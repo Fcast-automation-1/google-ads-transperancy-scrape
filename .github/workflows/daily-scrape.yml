@@ -26,14 +26,13 @@ jobs:
       
       - name: Create credentials file
         run: |
-          echo '${{ secrets.GOOGLE_CREDENTIALS }}' > google-ads-transperancy-scrape/credentials.json
+          echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
         shell: bash
       
       - name: Run scraping script
-        working-directory: google-ads-transperancy-scrape
         run: node agent.js
       
       - name: Cleanup credentials
         if: always()
-        run: rm -f google-ads-transperancy-scrape/credentials.json
+        run: rm -f credentials.json
 
