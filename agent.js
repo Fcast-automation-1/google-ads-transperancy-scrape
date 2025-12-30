@@ -8,7 +8,7 @@ const fs = require('fs');
 const SPREADSHEET_ID = '1beJ263B3m4L8pgD9RWsls-orKLUvLMfT2kExaiyNl7g';
 const SHEET_NAME = 'Sheet1';
 const CREDENTIALS_PATH = './credentials.json';
-const CONCURRENT_PAGES = 6; // Increased for better throughput
+const CONCURRENT_PAGES = 3; // Reduced for better stability/video loading
 const MAX_WAIT_TIME = 60000; // 60 seconds
 const POST_CLICK_WAIT = 12000; // Give video 12 seconds to load
 const MAX_RETRIES = 3; // Maximum retry attempts
@@ -19,7 +19,7 @@ const RETRY_WAIT_MULTIPLIER = 1.5; // Increase wait time by 1.5x on each retry
 // ============================================
 async function getGoogleSheetsClient() {
   const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH));
-  
+
   const auth = new google.auth.GoogleAuth({
     credentials,
     scopes: ['https://www.googleapis.com/auth/spreadsheets'],
@@ -27,7 +27,7 @@ async function getGoogleSheetsClient() {
 
   const authClient = await auth.getClient();
   const sheets = google.sheets({ version: 'v4', auth: authClient });
-  
+
   return sheets;
 }
 
@@ -40,13 +40,13 @@ async function getUrlsFromSheet(sheets) {
 
   const rows = response.data.values || [];
   const urlData = [];
-  
+
   // Skip header row, process each row
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
     const url = row[0]?.trim();
     const existingVideoId = row[5]?.trim(); // Column F is index 5
-    
+
     // Only include URLs that are not empty and don't have existing video ID
     if (url && !existingVideoId) {
       urlData.push({
@@ -55,13 +55,13 @@ async function getUrlsFromSheet(sheets) {
       });
     }
   }
-  
+
   return urlData;
 }
 
 async function batchWriteToSheet(sheets, updates) {
   if (updates.length === 0) return;
-  
+
   const data = updates.map(({ rowIndex, videoId }) => ({
     range: `${SHEET_NAME}!F${rowIndex + 2}`,
     values: [[videoId]]
@@ -94,7 +94,7 @@ async function extractVideoId(url, browser, attempt = 1, baseWaitTime = POST_CLI
   page.on('request', (request) => {
     const resourceType = request.resourceType();
     const requestUrl = request.url();
-    
+
     // Check for video ID in ALL requests (before blocking anything)
     if (requestUrl.includes('googlevideo.com/videoplayback')) {
       const urlParams = new URLSearchParams(requestUrl.split('?')[1]);
@@ -103,23 +103,23 @@ async function extractVideoId(url, browser, attempt = 1, baseWaitTime = POST_CLI
         videoSourceId = id;
       }
     }
-    
+
     // Only block large images and fonts - allow everything else
     if (['image', 'font'].includes(resourceType)) {
       request.abort();
       return;
     }
-    
+
     request.continue();
   });
 
   try {
     // Use networkidle2 for better stability with slow-loading pages
-    await page.goto(url, { 
+    await page.goto(url, {
       waitUntil: 'networkidle2',
-      timeout: MAX_WAIT_TIME 
+      timeout: MAX_WAIT_TIME
     });
-    
+
     // Initial wait - increase on retries
     const initialWait = 3000 * Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
     await sleep(initialWait);
@@ -158,7 +158,7 @@ async function extractVideoId(url, browser, attempt = 1, baseWaitTime = POST_CLI
             const found = searchForPlayButton(iframeDoc);
             if (found) break;
           }
-        } catch (e) {}
+        } catch (e) { }
       }
 
       if (!results.found) {
@@ -183,14 +183,14 @@ async function extractVideoId(url, browser, attempt = 1, baseWaitTime = POST_CLI
     if (playButtonInfo.found) {
       // Simple but realistic click
       const client = await page.target().createCDPSession();
-      
+
       await client.send('Input.dispatchMouseEvent', {
         type: 'mouseMoved',
         x: playButtonInfo.x,
         y: playButtonInfo.y
       });
       await sleep(100);
-      
+
       await client.send('Input.dispatchMouseEvent', {
         type: 'mousePressed',
         x: playButtonInfo.x,
@@ -199,7 +199,7 @@ async function extractVideoId(url, browser, attempt = 1, baseWaitTime = POST_CLI
         clickCount: 1
       });
       await sleep(80);
-      
+
       await client.send('Input.dispatchMouseEvent', {
         type: 'mouseReleased',
         x: playButtonInfo.x,
@@ -207,7 +207,7 @@ async function extractVideoId(url, browser, attempt = 1, baseWaitTime = POST_CLI
         button: 'left',
         clickCount: 1
       });
-      
+
       // Wait for video to start and make network request - increase wait time on retries
       const waitTime = baseWaitTime * Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
       await sleep(waitTime);
@@ -228,16 +228,16 @@ async function extractVideoIdWithRetry(url, browser, rowIndex) {
     if (attempt > 1) {
       console.log(`  🔄 [${rowIndex + 1}] Retry attempt ${attempt}/${MAX_RETRIES}...`);
     }
-    
+
     const videoId = await extractVideoId(url, browser, attempt, POST_CLICK_WAIT);
-    
+
     if (videoId) {
       if (attempt > 1) {
         console.log(`  ✅ [${rowIndex + 1}] Video ID found on attempt ${attempt}: ${videoId}`);
       }
       return videoId;
     }
-    
+
     if (attempt < MAX_RETRIES) {
       // Wait before retrying (exponential backoff)
       const retryDelay = 2000 * Math.pow(2, attempt - 1);
@@ -245,7 +245,7 @@ async function extractVideoIdWithRetry(url, browser, rowIndex) {
       await new Promise(r => setTimeout(r, retryDelay));
     }
   }
-  
+
   return null;
 }
 
@@ -258,11 +258,11 @@ async function processUrlBatch(urlData, startIndex, browser) {
       const actualIndex = startIndex + i;
       const rowIndex = item.rowIndex;
       const url = item.url;
-      
+
       console.log(`[${rowIndex + 1}] Processing: ${url.substring(0, 60)}...`);
-      
+
       const videoId = await extractVideoIdWithRetry(url, browser, rowIndex);
-      
+
       if (videoId) {
         console.log(`  ✅ [${rowIndex + 1}] Video ID: ${videoId}`);
         return { rowIndex: rowIndex, videoId };
@@ -272,7 +272,7 @@ async function processUrlBatch(urlData, startIndex, browser) {
       }
     })
   );
-  
+
   return results;
 }
 
@@ -313,25 +313,25 @@ async function processUrlBatch(urlData, startIndex, browser) {
   for (let i = 0; i < urlData.length; i += CONCURRENT_PAGES) {
     const batch = urlData.slice(i, i + CONCURRENT_PAGES);
     console.log(`\n📦 Processing batch ${Math.floor(i / CONCURRENT_PAGES) + 1}/${Math.ceil(urlData.length / CONCURRENT_PAGES)}`);
-    
+
     const batchResults = await processUrlBatch(batch, i, browser);
     allResults.push(...batchResults);
-    
+
     // Batch write to sheet
     await batchWriteToSheet(sheets, batchResults);
   }
 
   await browser.close();
-  
+
   const endTime = Date.now();
   const totalTime = ((endTime - startTime) / 1000).toFixed(2);
   const avgTime = (totalTime / urlData.length).toFixed(2);
-  
+
   console.log('\n✨ All done!');
   console.log(`⏱️  Total time: ${totalTime}s`);
   console.log(`⏱️  Average per URL: ${avgTime}s`);
   console.log(`✅ Found: ${allResults.filter(r => r.videoId !== 'NOT_FOUND').length}`);
   console.log(`❌ Not found: ${allResults.filter(r => r.videoId === 'NOT_FOUND').length}`);
-  
+
   process.exit(0);
 })();

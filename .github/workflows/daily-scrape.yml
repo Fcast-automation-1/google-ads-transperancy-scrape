@@ -14,6 +14,8 @@ on:
     # Run 4: 11:00 PM PKT (18:00 UTC)
     - cron: '0 18 * * *'
   workflow_dispatch: # Allows manual triggering
+  repository_dispatch:
+    types: [sheet_update]
 
 jobs:
   scrape:
