@@ -32,10 +32,10 @@ async function getGoogleSheetsClient() {
 }
 
 async function getUrlsFromSheet(sheets) {
-  // Get columns A to H
+  // Get columns A to F (A is 0, F is 5)
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME}!A:H`,
+    range: `${SHEET_NAME}!A:F`,
   });
 
   const rows = response.data.values || [];
@@ -45,12 +45,10 @@ async function getUrlsFromSheet(sheets) {
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
     const url = row[0]?.trim();
-    const existingVideoId = row[5]?.trim(); // Column F
-    const existingAppLink = row[6]?.trim(); // Column G
-    const existingAppName = row[7]?.trim(); // Column H
+    const existingDataInF = row[5]?.trim(); // Column F
 
-    // Process if it has a URL and is missing ANY of the target data
-    if (url && (!existingVideoId || !existingAppLink || !existingAppName)) {
+    // Process ONLY if Column A has a URL AND Column F is completely EMPTY
+    if (url && !existingDataInF) {
       urlData.push({
         url: url,
         rowIndex: i - 1
