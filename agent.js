@@ -277,20 +277,66 @@ async function processUrlBatch(urlData, startIndex, browser) {
 }
 
 // ============================================
+// SELF-RESTART LOGIC
+// ============================================
+async function triggerSelfRestart() {
+  const repo = process.env.GITHUB_REPOSITORY;
+  const token = process.env.GH_TOKEN;
+
+  if (!repo || !token) {
+    console.log('⚠️  Skipping auto-restart: GITHUB_REPOSITORY or GH_TOKEN missing in env.');
+    return;
+  }
+
+  console.log(`\n🔄 Triggering auto-restart for ${repo}...`);
+
+  const https = require('https');
+  const data = JSON.stringify({ event_type: 'sheet_update' });
+
+  const options = {
+    hostname: 'api.github.com',
+    port: 443,
+    path: `/repos/${repo}/dispatches`,
+    method: 'POST',
+    headers: {
+      'Authorization': `token ${token}`,
+      'User-Agent': 'Node.js-Scraper',
+      'Accept': 'application/vnd.github.v3+json',
+      'Content-Type': 'application/json',
+      'Content-Length': data.length
+    }
+  };
+
+  return new Promise((resolve) => {
+    const req = https.request(options, (res) => {
+      console.log(`  📡 GitHub Response: ${res.statusCode}`);
+      resolve();
+    });
+    req.on('error', (e) => {
+      console.error(`  ❌ Auto-restart error: ${e.message}`);
+      resolve();
+    });
+    req.write(data);
+    req.end();
+  });
+}
+
+// ============================================
 // MAIN FUNCTION
 // ============================================
 (async () => {
   console.log('📊 Starting BALANCED Google Sheets + Puppeteer Integration...\n');
-  const startTime = Date.now();
+  const sessionStartTime = Date.now();
+  const MAX_RUNTIME_MS = 330 * 60 * 1000; // 5 hours 30 minutes (safety margin)
 
   const sheets = await getGoogleSheetsClient();
   console.log('✅ Connected to Google Sheets\n');
 
-  const urlData = await getUrlsFromSheet(sheets);
-  console.log(`📋 Found ${urlData.length} URLs to process (skipping already scraped)\n`);
+  let urlData = await getUrlsFromSheet(sheets);
+  console.log(`📋 Found ${urlData.length} URLs to process\n`);
 
   if (urlData.length === 0) {
-    console.log('⚠️  No URLs found to process (all may already be scraped)');
+    console.log('⚠️  No URLs found to process.');
     process.exit(0);
   }
 
@@ -309,29 +355,33 @@ async function processUrlBatch(urlData, startIndex, browser) {
   console.log(`🌐 Browser launched - Processing ${CONCURRENT_PAGES} URLs at a time\n`);
 
   // Process URLs in batches
-  const allResults = [];
   for (let i = 0; i < urlData.length; i += CONCURRENT_PAGES) {
+    // CHECK FOR TIMEOUT
+    if (Date.now() - sessionStartTime > MAX_RUNTIME_MS) {
+      console.log('\n⏰ Reached 5.5 hour limit. Saving and restarting workflow...');
+      await browser.close();
+      await triggerSelfRestart();
+      process.exit(0);
+    }
+
     const batch = urlData.slice(i, i + CONCURRENT_PAGES);
     console.log(`\n📦 Processing batch ${Math.floor(i / CONCURRENT_PAGES) + 1}/${Math.ceil(urlData.length / CONCURRENT_PAGES)}`);
 
     const batchResults = await processUrlBatch(batch, i, browser);
-    allResults.push(...batchResults);
-
-    // Batch write to sheet
     await batchWriteToSheet(sheets, batchResults);
   }
 
   await browser.close();
 
-  const endTime = Date.now();
-  const totalTime = ((endTime - startTime) / 1000).toFixed(2);
-  const avgTime = (totalTime / urlData.length).toFixed(2);
-
-  console.log('\n✨ All done!');
-  console.log(`⏱️  Total time: ${totalTime}s`);
-  console.log(`⏱️  Average per URL: ${avgTime}s`);
-  console.log(`✅ Found: ${allResults.filter(r => r.videoId !== 'NOT_FOUND').length}`);
-  console.log(`❌ Not found: ${allResults.filter(r => r.videoId === 'NOT_FOUND').length}`);
+  // FINAL CHECK: Did more rows get added while we were running?
+  console.log('\n🏁 Finished initial batch. Checking for newly added rows...');
+  const remainingData = await getUrlsFromSheet(sheets);
+  if (remainingData.length > 0) {
+    console.log(`📈 ${remainingData.length} more links were found. Restarting workflow...`);
+    await triggerSelfRestart();
+  } else {
+    console.log('✨ All links processed. No more pending rows.');
+  }
 
   process.exit(0);
 })();

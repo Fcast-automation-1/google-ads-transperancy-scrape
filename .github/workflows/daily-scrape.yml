@@ -50,6 +50,8 @@ jobs:
       
       - name: Run scraping script
         run: node agent.js
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
       
       - name: Cleanup credentials
         if: always()
