@@ -12,7 +12,7 @@ on:
     types: [app_data_trigger]
 
 concurrency:
-  group: global-scraping-locked
+  group: app-data-group
   cancel-in-progress: true
 
 jobs:
