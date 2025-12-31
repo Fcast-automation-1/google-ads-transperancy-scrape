@@ -6,8 +6,7 @@ const fs = require('fs');
 // CONFIGURATION
 // ============================================
 const SPREADSHEET_ID = '1beJ263B3m4L8pgD9RWsls-orKLUvLMfT2kExaiyNl7g';
-const INPUT_SHEET_NAME = 'Sheet1';
-const OUTPUT_SHEET_NAME = 'Sheet6';
+const SHEET_NAME = 'Sheet1';
 const CREDENTIALS_PATH = './credentials.json';
 const CONCURRENT_PAGES = 3;
 const MAX_WAIT_TIME = 60000;
@@ -27,27 +26,64 @@ async function getGoogleSheetsClient() {
     return google.sheets({ version: 'v4', auth: authClient });
 }
 
-async function getInputsAndProcessed(sheets) {
-    const inputResponse = await sheets.spreadsheets.values.get({
+async function getUrlData(sheets) {
+    // Read columns A through H to check for existing data in G and H
+    // A=0, B=1, C=2, D=3, E=4, F=5, G=6, H=7
+    const response = await sheets.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
-        range: `${INPUT_SHEET_NAME}!A:A`,
+        range: `${SHEET_NAME}!A:H`,
     });
-    const inputRows = inputResponse.data.values || [];
 
-    const outputResponse = await sheets.spreadsheets.values.get({
-        spreadsheetId: SPREADSHEET_ID,
-        range: `${OUTPUT_SHEET_NAME}!A:A`,
-    });
-    const processedUrls = new Set((outputResponse.data.values || []).map(row => row[0]?.trim()).filter(Boolean));
-
+    const rows = response.data.values || [];
     const toProcess = [];
-    for (let i = 1; i < inputRows.length; i++) {
-        const url = inputRows[i][0]?.trim();
-        if (url && !processedUrls.has(url)) {
-            toProcess.push({ url, rowIndex: i });
+
+    // Skip header row
+    for (let i = 1; i < rows.length; i++) {
+        const row = rows[i];
+        const url = row[0]?.trim();
+        const existingAppLink = row[6]?.trim(); // Column G
+        const existingAppName = row[7]?.trim(); // Column H
+
+        // Process if URL exists and Column G (APP Links) is empty
+        if (url && !existingAppLink) {
+            toProcess.push({
+                url: url,
+                rowIndex: i // 0-indexed row number (row 2 in sheet is index 1)
+            });
         }
     }
     return toProcess;
+}
+
+async function batchWriteToSheet(sheets, updates) {
+    if (updates.length === 0) return;
+
+    const data = [];
+    updates.forEach(({ rowIndex, appName, storeLink }) => {
+        // Column G is index 6, Column H is index 7
+        // Spreadsheet rows are 1-indexed, so rowIndex + 1
+        data.push({
+            range: `${SHEET_NAME}!G${rowIndex + 1}`,
+            values: [[storeLink]]
+        });
+        data.push({
+            range: `${SHEET_NAME}!H${rowIndex + 1}`,
+            values: [[appName]]
+        });
+    });
+
+    try {
+        await sheets.spreadsheets.values.batchUpdate({
+            spreadsheetId: SPREADSHEET_ID,
+            resource: {
+                valueInputOption: 'RAW',
+                data: data
+            }
+        });
+        console.log(`  ✅ Batch updated ${updates.length} rows (Columns G & H)`);
+    } catch (error) {
+        console.error(`  ❌ Batch update error:`, error.message);
+    }
 }
 
 // ============================================
@@ -60,8 +96,6 @@ async function extractAppData(transparencyUrl, browser, attempt = 1) {
 
     try {
         console.log(`  🚀 Loading: ${transparencyUrl.substring(0, 60)}...`);
-
-        // Using networkidle0 as per the user's provided code for thorough loading
         await page.goto(transparencyUrl, { waitUntil: 'networkidle0', timeout: MAX_WAIT_TIME });
 
         const baseWait = 5000 * Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
@@ -73,7 +107,6 @@ async function extractAppData(transparencyUrl, browser, attempt = 1) {
         await page.evaluate(() => window.scrollTo(0, 0));
         await sleep(2000);
 
-        // 1. Check ALL frames for both App Name and Ad Link
         const frames = page.frames();
         for (let i = 0; i < frames.length; i++) {
             const frame = frames[i];
@@ -81,15 +114,11 @@ async function extractAppData(transparencyUrl, browser, attempt = 1) {
                 const frameData = await frame.evaluate(() => {
                     const data = { appName: null, storeLink: null };
 
-                    // --- STORE LINK DETECTION ---
-                    // Try XPath from user code
+                    // Store Link detection (using XPath and selectors from user-provided logic)
                     const xpath = '//*[@id="portrait-landscape-phone"]/div[1]/div[5]/a[2]';
                     const xpathResult = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
-                    if (xpathResult && xpathResult.href) {
-                        data.storeLink = xpathResult.href;
-                    }
+                    if (xpathResult && xpathResult.href) data.storeLink = xpathResult.href;
 
-                    // Try specified selectors
                     const linkSelectors = [
                         'a[data-asoch-targets*="ochAppName"]',
                         'a.ns-sbqu4-e-75[href*="googleadservices"]',
@@ -109,13 +138,12 @@ async function extractAppData(transparencyUrl, browser, attempt = 1) {
                         }
                     }
 
-                    // fallback to any googleadservices link
                     if (!data.storeLink) {
                         const allLinks = document.querySelectorAll('a[href*="googleadservices"]');
                         if (allLinks.length > 0) data.storeLink = allLinks[0].href;
                     }
 
-                    // --- APP NAME DETECTION ---
+                    // App Name detection
                     const nameSelectors = [
                         'a[data-asoch-targets*="ochAppName"]',
                         '.short-app-name a',
@@ -129,27 +157,22 @@ async function extractAppData(transparencyUrl, browser, attempt = 1) {
                             break;
                         }
                     }
-
                     return data;
                 });
 
                 if (frameData.storeLink && result.storeLink === 'NOT_FOUND') result.storeLink = frameData.storeLink;
                 if (frameData.appName && result.appName === 'NOT_FOUND') result.appName = frameData.appName;
-
                 if (result.storeLink !== 'NOT_FOUND' && result.appName !== 'NOT_FOUND') break;
             } catch (e) { }
         }
 
-        // 2. Search main page and Regex Fallback if still not found
         if (result.storeLink === 'NOT_FOUND') {
             const html = await page.content();
             const matches = html.match(/https:\/\/www\.googleadservices\.com\/pagead\/aclk[^"'’\s]*/g);
-            if (matches && matches.length > 0) {
-                result.storeLink = matches[0];
-            }
+            if (matches && matches.length > 0) result.storeLink = matches[0];
         }
 
-        // --- FINAL CLEANUP OF LINK ---
+        // Cleanup Google Ad Services redirects to direct store links if possible
         if (result.storeLink !== 'NOT_FOUND' && result.storeLink.includes('googleadservices.com/')) {
             try {
                 const urlObj = new URL(result.storeLink);
@@ -170,10 +193,7 @@ async function extractAppData(transparencyUrl, browser, attempt = 1) {
 async function extractWithRetry(url, browser) {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         const data = await extractAppData(url, browser, attempt);
-        // If we found at least one pieces of info, we count it as a success for that level
-        if (data.appName !== 'NOT_FOUND' || data.storeLink !== 'NOT_FOUND') {
-            return data;
-        }
+        if (data.appName !== 'NOT_FOUND' || data.storeLink !== 'NOT_FOUND') return data;
         if (attempt < MAX_RETRIES) {
             console.log(`  🔄 [Attempt ${attempt}] Info not found, retrying...`);
             await new Promise(r => setTimeout(r, 3000));
@@ -186,10 +206,10 @@ async function extractWithRetry(url, browser) {
 // MAIN EXECUTION
 // ============================================
 (async () => {
-    console.log(`🤖 Starting App Info Agent (Sheet1 -> ${OUTPUT_SHEET_NAME})...\n`);
+    console.log(`🤖 Starting App Info Agent (Sheet1 Column G & H)...\n`);
 
     const sheets = await getGoogleSheetsClient();
-    const toProcess = await getInputsAndProcessed(sheets);
+    const toProcess = await getUrlData(sheets);
 
     if (toProcess.length === 0) {
         console.log('✨ No new URLs to process.');
@@ -216,25 +236,13 @@ async function extractWithRetry(url, browser) {
         console.log(`\n📦 Batch ${Math.floor(i / CONCURRENT_PAGES) + 1}/${Math.ceil(toProcess.length / CONCURRENT_PAGES)}`);
 
         const batchResults = await Promise.all(batch.map(async (item) => {
-            console.log(`  🔗 Processing: ...${item.url.substring(item.url.length - 30)}`);
+            console.log(`  🔗 [Row ${item.rowIndex + 1}] Processing...`);
             const data = await extractWithRetry(item.url, browser);
-            console.log(`  ✅ Result: [${data.appName}] [${data.storeLink.substring(0, 30)}...]`);
-            return { url: item.url, appName: data.appName, storeLink: data.storeLink };
+            console.log(`  ✅ [Row ${item.rowIndex + 1}] Result: [${data.appName}]`);
+            return { rowIndex: item.rowIndex, appName: data.appName, storeLink: data.storeLink };
         }));
 
-        const values = batchResults.map(r => [r.url, r.appName, r.storeLink, new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' })]);
-
-        try {
-            await sheets.spreadsheets.values.append({
-                spreadsheetId: SPREADSHEET_ID,
-                range: `${OUTPUT_SHEET_NAME}!A:D`,
-                valueInputOption: 'RAW',
-                resource: { values }
-            });
-            console.log(`  💾 Saved ${batchResults.length} rows to ${OUTPUT_SHEET_NAME}`);
-        } catch (err) {
-            console.error(`  ❌ Sheet write error: ${err.message}`);
-        }
+        await batchWriteToSheet(sheets, batchResults);
     }
 
     await browser.close();
