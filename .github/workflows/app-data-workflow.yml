@@ -1,0 +1,50 @@
+name: App Data Workflow
+
+on:
+  schedule:
+    # Runs 4 times per day (every 6 hours)
+    - cron: '30 2 * * *'
+    - cron: '30 8 * * *'
+    - cron: '30 14 * * *'
+    - cron: '30 20 * * *'
+  workflow_dispatch:
+  repository_dispatch:
+    types: [app_data_trigger]
+
+concurrency:
+  group: app-data-group
+  cancel-in-progress: true
+
+jobs:
+  run-app-data-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Create credentials file
+        run: |
+          cat > credentials.json << EOF
+          ${{ secrets.GOOGLE_CREDENTIALS }}
+          EOF
+        shell: bash
+      
+      - name: Run app data agent script
+        run: node app_data_agent.js
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      
+      - name: Cleanup credentials
+        if: always()
+        run: rm -f credentials.json
