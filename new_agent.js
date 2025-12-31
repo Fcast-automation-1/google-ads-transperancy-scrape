@@ -27,21 +27,30 @@ async function getGoogleSheetsClient() {
 }
 
 async function getUrlData(sheets) {
-    // Read A to H
     const response = await sheets.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
         range: `${SHEET_NAME}!A:H`,
     });
     const rows = response.data.values || [];
-    const toProcess = [];
 
-    for (let i = 1; i < rows.length; i++) {
+    // 1. Find the index of the LAST row that has data in Column G
+    let lastProcessedIndex = 0;
+    for (let i = rows.length - 1; i >= 1; i--) {
+        if (rows[i][6]?.trim()) {
+            lastProcessedIndex = i;
+            break;
+        }
+    }
+
+    console.log(`  🔍 Last processed row was: ${lastProcessedIndex + 1}`);
+
+    const toProcess = [];
+    // 2. Start collecting URLs ONLY from rows AFTER the last processed one
+    for (let i = lastProcessedIndex + 1; i < rows.length; i++) {
         const row = rows[i];
         const url = row[0]?.trim();
-        const existingAppLink = row[6]?.trim(); // Column G
-
-        if (url && !existingAppLink) {
-            toProcess.push({ url, rowIndex: i }); // rowIndex is 0-indexed relative to data
+        if (url) {
+            toProcess.push({ url, rowIndex: i });
         }
     }
     return toProcess;
