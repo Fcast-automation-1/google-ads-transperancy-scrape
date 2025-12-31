@@ -157,13 +157,18 @@ async function extractAppData(url, browser, attempt = 1) {
                     const xpRes = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
                     if (xpRes && xpRes.href) data.storeLink = xpRes.href;
 
+                    // App Link Selectors (Expanded for Text Ads)
                     const linkSelectors = [
                         'a[data-asoch-targets*="ochAppName"]',
                         'a[data-asoch-targets*="ochInstallButton"]',
+                        'a[data-asoch-targets*="ctaButton"]', // Common in text ads
                         'a.ns-sbqu4-e-75[href*="googleadservices"]',
+                        'a.install-button-anchor[href*="googleadservices"]',
                         'a[href*="googleadservices.com/pagead/aclk"]',
-                        'a[href*="play.google.com/store/apps/details"]'
+                        'a[href*="play.google.com/store/apps/details"]',
+                        'a[href*="itunes.apple.com"]'
                     ];
+
                     if (!data.storeLink) {
                         for (const sel of linkSelectors) {
                             const el = root.querySelector(sel);
@@ -174,12 +179,27 @@ async function extractAppData(url, browser, attempt = 1) {
                         }
                     }
 
+                    // Fallback Link: Any link that looks like a destination (not google internal)
+                    if (!data.storeLink) {
+                        const allLinks = Array.from(root.querySelectorAll('a[href]'));
+                        const destLink = allLinks.find(a =>
+                            !a.href.includes('google.com/ads') &&
+                            !a.href.includes('google.com/transparency') &&
+                            a.href.startsWith('http')
+                        );
+                        if (destLink) data.storeLink = destLink.href;
+                    }
+
+                    // App Name / Brand Name Selectors (Expanded for Text Ads)
                     const nameSelectors = [
                         'a[data-asoch-targets*="ochAppName"]',
+                        'a[data-asoch-targets*="AdTitle"]', // Text ad heading
                         '.short-app-name a',
                         'div[class*="app-name"]',
                         'span[class*="app-name"]',
-                        '.app-title'
+                        '.app-title',
+                        '.advertiser-name',
+                        'h1', 'h2' // heading fallback
                     ];
                     for (const sel of nameSelectors) {
                         const el = root.querySelector(sel);
