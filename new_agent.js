@@ -11,7 +11,6 @@ const OUTPUT_SHEET_NAME = 'Sheet6';
 const CREDENTIALS_PATH = './credentials.json';
 const CONCURRENT_PAGES = 3;
 const MAX_WAIT_TIME = 60000;
-const POST_CLICK_WAIT = 12000;
 const MAX_RETRIES = 3;
 const RETRY_WAIT_MULTIPLIER = 1.5;
 
@@ -29,14 +28,12 @@ async function getGoogleSheetsClient() {
 }
 
 async function getInputsAndProcessed(sheets) {
-    // Get URLs from Sheet1 Column A
     const inputResponse = await sheets.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
         range: `${INPUT_SHEET_NAME}!A:A`,
     });
     const inputRows = inputResponse.data.values || [];
 
-    // Get already processed URLs from Sheet6 Column A to avoid duplicates
     const outputResponse = await sheets.spreadsheets.values.get({
         spreadsheetId: SPREADSHEET_ID,
         range: `${OUTPUT_SHEET_NAME}!A:A`,
@@ -44,7 +41,6 @@ async function getInputsAndProcessed(sheets) {
     const processedUrls = new Set((outputResponse.data.values || []).map(row => row[0]?.trim()).filter(Boolean));
 
     const toProcess = [];
-    // Skip header, assuming row 0 is header
     for (let i = 1; i < inputRows.length; i++) {
         const url = inputRows[i][0]?.trim();
         if (url && !processedUrls.has(url)) {
@@ -55,82 +51,117 @@ async function getInputsAndProcessed(sheets) {
 }
 
 // ============================================
-// EXTRACTION LOGIC
+// AD DATA EXTRACTOR
 // ============================================
-async function extractAppData(url, browser, attempt = 1) {
+async function extractAppData(transparencyUrl, browser, attempt = 1) {
     const page = await browser.newPage();
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    let result = { appName: 'NOT_FOUND', storeLink: 'NOT_FOUND' };
 
     try {
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: MAX_WAIT_TIME });
+        console.log(`  🚀 Loading: ${transparencyUrl.substring(0, 60)}...`);
 
-        // Initial wait for dynamic content
+        // Using networkidle0 as per the user's provided code for thorough loading
+        await page.goto(transparencyUrl, { waitUntil: 'networkidle0', timeout: MAX_WAIT_TIME });
+
         const baseWait = 5000 * Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
         await sleep(baseWait);
 
-        const appData = await page.evaluate(() => {
-            const results = { appName: 'NOT_FOUND', storeLink: 'NOT_FOUND' };
+        // Scroll to trigger lazy loading
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await sleep(2000);
+        await page.evaluate(() => window.scrollTo(0, 0));
+        await sleep(2000);
 
-            const searchInDoc = (doc) => {
-                // Find App Name using visual cues from user
-                const nameEl = doc.querySelector('a[data-asoch-targets*="ochAppName"]') ||
-                    doc.querySelector('.short-app-name a');
-
-                if (nameEl) {
-                    results.appName = nameEl.innerText.trim();
-                    if (results.storeLink === 'NOT_FOUND') results.storeLink = nameEl.href;
-                }
-
-                // Look for Play Store or App Store links
-                const allLinks = Array.from(doc.querySelectorAll('a'));
-                for (const a of allLinks) {
-                    const href = a.href || '';
-                    if (href.includes('play.google.com') || href.includes('itunes.apple.com')) {
-                        results.storeLink = href;
-                        break;
-                    }
-                    // Check for install button targets
-                    const targets = a.getAttribute('data-asoch-targets') || '';
-                    if (targets.includes('ochAppIcon') || targets.includes('ochInstallButton')) {
-                        if (results.storeLink === 'NOT_FOUND') results.storeLink = href;
-                    }
-                }
-                return results.appName !== 'NOT_FOUND' && results.storeLink !== 'NOT_FOUND';
-            };
-
-            // 1. Search top level
-            searchInDoc(document);
-
-            // 2. Search in iframes
-            const iframes = document.querySelectorAll('iframe');
-            for (const iframe of iframes) {
-                try {
-                    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
-                    if (iframeDoc) {
-                        const found = searchInDoc(iframeDoc);
-                        if (found) break;
-                    }
-                } catch (e) { }
-            }
-
-            return results;
-        });
-
-        // Handle googleadservices redirect
-        if (appData.storeLink && appData.storeLink.includes('googleadservices.com/')) {
+        // 1. Check ALL frames for both App Name and Ad Link
+        const frames = page.frames();
+        for (let i = 0; i < frames.length; i++) {
+            const frame = frames[i];
             try {
-                const urlObj = new URL(appData.storeLink);
+                const frameData = await frame.evaluate(() => {
+                    const data = { appName: null, storeLink: null };
+
+                    // --- STORE LINK DETECTION ---
+                    // Try XPath from user code
+                    const xpath = '//*[@id="portrait-landscape-phone"]/div[1]/div[5]/a[2]';
+                    const xpathResult = document.evaluate(xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+                    if (xpathResult && xpathResult.href) {
+                        data.storeLink = xpathResult.href;
+                    }
+
+                    // Try specified selectors
+                    const linkSelectors = [
+                        'a[data-asoch-targets*="ochAppName"]',
+                        'a.ns-sbqu4-e-75[href*="googleadservices"]',
+                        'a.install-button-anchor[href*="googleadservices"]',
+                        'a[data-asoch-targets][href*="googleadservices"]',
+                        '#portrait-landscape-phone a[href*="googleadservices"]',
+                        'a[href*="googleadservices.com/pagead/aclk"]'
+                    ];
+
+                    if (!data.storeLink) {
+                        for (const sel of linkSelectors) {
+                            const el = document.querySelector(sel);
+                            if (el && el.href) {
+                                data.storeLink = el.href;
+                                break;
+                            }
+                        }
+                    }
+
+                    // fallback to any googleadservices link
+                    if (!data.storeLink) {
+                        const allLinks = document.querySelectorAll('a[href*="googleadservices"]');
+                        if (allLinks.length > 0) data.storeLink = allLinks[0].href;
+                    }
+
+                    // --- APP NAME DETECTION ---
+                    const nameSelectors = [
+                        'a[data-asoch-targets*="ochAppName"]',
+                        '.short-app-name a',
+                        'a[class*="app-name"]',
+                        'span[class*="app-name"]'
+                    ];
+                    for (const sel of nameSelectors) {
+                        const el = document.querySelector(sel);
+                        if (el && el.innerText.trim()) {
+                            data.appName = el.innerText.trim();
+                            break;
+                        }
+                    }
+
+                    return data;
+                });
+
+                if (frameData.storeLink && result.storeLink === 'NOT_FOUND') result.storeLink = frameData.storeLink;
+                if (frameData.appName && result.appName === 'NOT_FOUND') result.appName = frameData.appName;
+
+                if (result.storeLink !== 'NOT_FOUND' && result.appName !== 'NOT_FOUND') break;
+            } catch (e) { }
+        }
+
+        // 2. Search main page and Regex Fallback if still not found
+        if (result.storeLink === 'NOT_FOUND') {
+            const html = await page.content();
+            const matches = html.match(/https:\/\/www\.googleadservices\.com\/pagead\/aclk[^"'’\s]*/g);
+            if (matches && matches.length > 0) {
+                result.storeLink = matches[0];
+            }
+        }
+
+        // --- FINAL CLEANUP OF LINK ---
+        if (result.storeLink !== 'NOT_FOUND' && result.storeLink.includes('googleadservices.com/')) {
+            try {
+                const urlObj = new URL(result.storeLink);
                 const adUrl = urlObj.searchParams.get('adurl');
-                if (adUrl) {
-                    appData.storeLink = adUrl;
-                }
+                if (adUrl) result.storeLink = adUrl;
             } catch (e) { }
         }
 
         await page.close();
-        return appData;
+        return result;
     } catch (err) {
-        console.error(`  ❌ Error on ${url.substring(0, 30)} (Attempt ${attempt}): ${err.message}`);
+        console.error(`  ❌ Error: ${err.message}`);
         await page.close();
         return { appName: 'ERROR', storeLink: 'ERROR' };
     }
@@ -139,11 +170,12 @@ async function extractAppData(url, browser, attempt = 1) {
 async function extractWithRetry(url, browser) {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         const data = await extractAppData(url, browser, attempt);
-        if (data.appName && data.appName !== 'ERROR' && data.appName !== 'NOT_FOUND') {
+        // If we found at least one pieces of info, we count it as a success for that level
+        if (data.appName !== 'NOT_FOUND' || data.storeLink !== 'NOT_FOUND') {
             return data;
         }
         if (attempt < MAX_RETRIES) {
-            console.log(`  🔄 [${url.substring(url.length - 15)}] Retry ${attempt}/${MAX_RETRIES}...`);
+            console.log(`  🔄 [Attempt ${attempt}] Info not found, retrying...`);
             await new Promise(r => setTimeout(r, 3000));
         }
     }
@@ -168,11 +200,14 @@ async function extractWithRetry(url, browser) {
 
     const browser = await puppeteer.launch({
         headless: true,
+        defaultViewport: { width: 1920, height: 1080 },
         args: [
+            '--autoplay-policy=no-user-gesture-required',
+            '--disable-blink-features=AutomationControlled',
             '--no-sandbox',
             '--disable-setuid-sandbox',
-            '--disable-blink-features=AutomationControlled',
-            '--autoplay-policy=no-user-gesture-required'
+            '--disable-web-security',
+            '--disable-features=IsolateOrigins,site-per-process'
         ]
     });
 
@@ -181,13 +216,12 @@ async function extractWithRetry(url, browser) {
         console.log(`\n📦 Batch ${Math.floor(i / CONCURRENT_PAGES) + 1}/${Math.ceil(toProcess.length / CONCURRENT_PAGES)}`);
 
         const batchResults = await Promise.all(batch.map(async (item) => {
-            console.log(`  🔗 Processing: ...${item.url.substring(item.url.length - 40)}`);
+            console.log(`  🔗 Processing: ...${item.url.substring(item.url.length - 30)}`);
             const data = await extractWithRetry(item.url, browser);
-            console.log(`  ✅ Result: [${data.appName}]`);
+            console.log(`  ✅ Result: [${data.appName}] [${data.storeLink.substring(0, 30)}...]`);
             return { url: item.url, appName: data.appName, storeLink: data.storeLink };
         }));
 
-        // Output: Column A: URL, Column B: App Name, Column C: Playstore Link, Column D: Timestamp
         const values = batchResults.map(r => [r.url, r.appName, r.storeLink, new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' })]);
 
         try {
@@ -197,9 +231,9 @@ async function extractWithRetry(url, browser) {
                 valueInputOption: 'RAW',
                 resource: { values }
             });
-            console.log(`  💾 Saved ${batchResults.length} rows to Sheet6`);
-        } catch (error) {
-            console.error(`  ❌ Append error:`, error.message);
+            console.log(`  💾 Saved ${batchResults.length} rows to ${OUTPUT_SHEET_NAME}`);
+        } catch (err) {
+            console.error(`  ❌ Sheet write error: ${err.message}`);
         }
     }
 
