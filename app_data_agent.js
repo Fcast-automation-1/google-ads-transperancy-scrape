@@ -218,22 +218,37 @@ async function extractAppData(url, browser, attempt = 1) {
                         }
                     }
 
-                    // App Name / Brand Name Selectors (Expanded for Text Ads)
+                    // App Name / Brand Name Selectors (Expanded for Text & Video Ads)
                     const nameSelectors = [
                         'a[data-asoch-targets*="ochAppName"]',
-                        'a[data-asoch-targets*="AdTitle"]', // Text ad heading
+                        'a[data-asoch-targets*="AdTitle"]',
+                        '[role="heading"] span', // Targeted for the "Plant Identifier" style ads
+                        '[role="link"] span',    // Targeted fallback for headlines
                         '.short-app-name a',
                         'div[class*="app-name"]',
                         'span[class*="app-name"]',
                         '.app-title',
                         '.advertiser-name',
-                        'h1', 'h2' // heading fallback
+                        'h1', 'h2'
                     ];
-                    for (const sel of nameSelectors) {
-                        const el = root.querySelector(sel);
-                        if (el && el.innerText.trim()) {
-                            data.appName = el.innerText.trim();
-                            break;
+
+                    // Special Search: If no name found yet, look for the largest span in the container
+                    if (root !== document.body) {
+                        for (const sel of nameSelectors) {
+                            const el = root.querySelector(sel);
+                            if (el && el.innerText.trim().length > 2) {
+                                data.appName = el.innerText.trim();
+                                break;
+                            }
+                        }
+                    } else {
+                        // Fallback logic for name if still null
+                        for (const sel of nameSelectors) {
+                            const el = document.querySelector(sel);
+                            if (el && el.innerText.trim()) {
+                                data.appName = el.innerText.trim();
+                                break;
+                            }
                         }
                     }
                     return data;
