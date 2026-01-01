@@ -285,8 +285,8 @@ async function extractAppData(url, browser, attempt = 1) {
                         'a[data-asoch-targets*="ochAppName"]',
                         'a[data-asoch-targets*="ochInstallButton"]',
                         'a[data-asoch-targets*="ctaButton"]',
-                        'a.ns-sbqu4-e-75[href*="googleadservices"]',
-                        'a.install-button-anchor[href*="googleadservices"]',
+                        'a.ns-sbqu4-e-75',
+                        'a.install-button-anchor',
                         'a[href*="googleadservices.com/pagead/aclk"]',
                         'a[href*="play.google.com/store/apps/details"]',
                         'a[href*="itunes.apple.com"]'
@@ -296,8 +296,30 @@ async function extractAppData(url, browser, attempt = 1) {
                         for (const sel of linkSelectors) {
                             const el = root.querySelector(sel);
                             if (el && el.href && !el.href.includes('javascript:')) {
-                                data.storeLink = el.href;
-                                break;
+                                const href = el.href;
+                                // Prefer direct Play / iTunes links
+                                if (href.includes('play.google.com') || href.includes('itunes.apple.com')) {
+                                    data.storeLink = href;
+                                    break;
+                                }
+                                // If it's a googleadservices redirect, try to extract adurl param that points to play/itunes
+                                if (href.includes('googleadservices')) {
+                                    try {
+                                        const m = href.match(/[\?&]adurl=([^&\s]+)/i);
+                                        if (m && m[1]) {
+                                            const decoded = decodeURIComponent(m[1]);
+                                            if (decoded.includes('play.google.com') || decoded.includes('itunes.apple.com')) {
+                                                data.storeLink = decoded;
+                                                break;
+                                            }
+                                        }
+                                    } catch (e) { }
+                                }
+                                // As a last resort, accept other honest-looking links (but prefer store links)
+                                if (!data.storeLink && (href.includes('play.google.com') || href.includes('itunes.apple.com') || href.includes('/store/apps/details'))) {
+                                    data.storeLink = href;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -334,15 +356,36 @@ async function extractAppData(url, browser, attempt = 1) {
             } catch (e) { }
         }
 
-        // RegEx fallback for the link from full page source
+        // RegEx fallback for the link from full page source (prefer direct Play / iTunes links)
         const pageSource = await page.content();
         if (result.storeLink === 'NOT_FOUND') {
-            const matches = pageSource.match(/https:\/\/www\.googleadservices\.com\/pagead\/aclk[^"'’\s]*/g);
-            if (matches) result.storeLink = matches[0];
+            const playMatches = pageSource.match(/https:\/\/play\.google\.com\/store\/apps\/details\?id=[^"'’\s]*/g);
+            if (playMatches) {
+                result.storeLink = playMatches[0];
+            } else {
+                const itunesMatches = pageSource.match(/https:\/\/itunes\.apple\.com\/[^"'’\s]*/g);
+                if (itunesMatches) {
+                    result.storeLink = itunesMatches[0];
+                } else {
+                    const gadMatches = pageSource.match(/https:\/\/www\.googleadservices\.com\/pagead\/aclk[^"'’\s]*/g);
+                    if (gadMatches) {
+                        // Try to find adurl query param inside the googleadservices url
+                        const m = gadMatches[0].match(/[\?&]adurl=([^&\s]+)/i);
+                        if (m && m[1]) {
+                            try {
+                                const decoded = decodeURIComponent(m[1]);
+                                if (decoded.includes('play.google.com') || decoded.includes('itunes.apple.com')) {
+                                    result.storeLink = decoded;
+                                }
+                            } catch (e) { }
+                        }
+                    }
+                }
+            }
         }
 
-        // HEURISTIC: Search for Android Package Names (com.xxx) in the source code
-        if (result.storeLink === 'NOT_FOUND' || result.storeLink.includes('googleadservices')) {
+        // HEURISTIC: Search for Android Package Names (com.xxx) in the source code if still not found
+        if (result.storeLink === 'NOT_FOUND' || (result.storeLink && result.storeLink.includes('googleadservices') && !result.storeLink.includes('play.google.com'))) {
             // Find patterns like "com.company.app" inside quotes
             const packageMatch = pageSource.match(/["'](com\.[a-z0-9_]+\.[a-z0-9_][a-z0-9_.]+)["']/i);
             if (packageMatch && packageMatch[1]) {
@@ -352,6 +395,25 @@ async function extractAppData(url, browser, attempt = 1) {
                     result.storeLink = `https://play.google.com/store/apps/details?id=${pkg}`;
                 }
             }
+        }
+
+        // If we still don't have appName, try meta tags/title as fallback
+        if (result.appName === 'NOT_FOUND') {
+            try {
+                const metaOg = pageSource.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i);
+                if (metaOg && metaOg[1]) result.appName = metaOg[1].trim();
+                if (result.appName === 'NOT_FOUND') {
+                    const metaTitle = pageSource.match(/<meta[^>]+name=["']title["'][^>]+content=["']([^"']+)["']/i);
+                    if (metaTitle && metaTitle[1]) result.appName = metaTitle[1].trim();
+                }
+                if (result.appName === 'NOT_FOUND') {
+                    const titleTag = pageSource.match(/<title>([^<]+)<\/title>/i);
+                    if (titleTag && titleTag[1]) {
+                        // strip site suffixes like " - Google Ads" or similar
+                        result.appName = titleTag[1].split('|')[0].split('-')[0].trim();
+                    }
+                }
+            } catch (e) { }
         }
 
         // Direct store link cleanup
@@ -429,6 +491,9 @@ async function extractWithRetry(url, browser) {
                     const data = await extractWithRetry(item.url, browser);
                     return { url: item.url, ...data };
                 }));
+
+                // Debug: show extracted results before writing
+                results.forEach(r => console.log(`  → ${r.url.substring(0,80)} => ${r.storeLink} | ${r.appName}`));
 
                 if (results.some(r => r.appName === 'BLOCKED')) {
                     console.log('  🛑 Block detected on this proxy. Closing browser and rotating proxy...');
