@@ -233,11 +233,12 @@ async function extractAppData(url, browser, attempt = 1) {
         const response = await page.goto(url, { waitUntil: 'networkidle0', timeout: MAX_WAIT_TIME });
 
         // 1. Capture the "Advertiser Name" from the main page to use as a blacklist
-        // Also check if it's a video ad (checking for actual video element ONLY)
+        // Also check if it's a video ad (checking for actual video element ONLY with valid dimensions)
         const mainPageInfo = await page.evaluate(() => {
             const topTitle = document.querySelector('h1, .advertiser-name, .ad-details-heading');
-            // User requested NOT to check 'Format: Video' text, only actual video elements
-            const isVideo = !!document.querySelector('video');
+            // Strict check: Video must exist AND be visible (larger than a pixel tracker)
+            const videoEl = document.querySelector('video');
+            const isVideo = videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10;
             return {
                 blacklist: topTitle ? topTitle.innerText.trim().toLowerCase() : '',
                 isVideo
@@ -288,7 +289,10 @@ async function extractAppData(url, browser, attempt = 1) {
                     const data = { appName: null, storeLink: null, isVideo: false };
                     const root = document.querySelector('#portrait-landscape-phone') || document.body;
 
-                    if (document.querySelector('video')) data.isVideo = true;
+                    const videoEl = document.querySelector('video');
+                    if (videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10) {
+                        data.isVideo = true;
+                    }
 
                     // Helper to clean/extract real link from an href
                     const cleanLink = (href) => {
