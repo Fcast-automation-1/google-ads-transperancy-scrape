@@ -437,14 +437,20 @@ async function extractAppData(url, browser, attempt = 1) {
                     return data;
                 }, blacklistName);
 
-                if (frameData.storeLink && result.storeLink === 'NOT_FOUND') result.storeLink = frameData.storeLink;
-                if (frameData.appName && result.appName === 'NOT_FOUND') result.appName = cleanName(frameData.appName);
-                // Trust the frame's classification if it found data
-                if (frameData.appName || frameData.storeLink) {
+                if (frameData.appName && result.appName === 'NOT_FOUND') {
+                    result.appName = cleanName(frameData.appName);
                     result.isVideo = frameData.isVideo;
-                }
 
-                if (result.storeLink !== 'NOT_FOUND' && result.appName !== 'NOT_FOUND') break;
+                    // For Video Ads, assign the store link
+                    // For Text Ads (storeLink is null from frame), keep it as NOT_FOUND
+                    if (frameData.storeLink) {
+                        result.storeLink = frameData.storeLink;
+                    }
+
+                    // BREAK the loop once we found the app data
+                    // This prevents Text Ads from picking up wrong links from other frames
+                    break;
+                }
             } catch (e) { }
         }
 
