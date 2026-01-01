@@ -14,6 +14,8 @@
   "dependencies": {
     "googleapis": "^169.0.0",
     "p-limit": "^7.2.0",
-    "puppeteer": "^24.34.0"
+    "puppeteer": "^24.34.0",
+    "puppeteer-extra": "^3.4.0",
+    "puppeteer-extra-plugin-stealth": "^2.12.1"
   }
 }

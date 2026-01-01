@@ -1,6 +1,11 @@
-const puppeteer = require('puppeteer');
+// Use puppeteer-extra + stealth plugin for better anti-detection
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
 const { google } = require('googleapis');
 const fs = require('fs');
+// NOTE: run `npm i puppeteer puppeteer-extra puppeteer-extra-plugin-stealth` to install new deps
+// Optional env vars: PROXIES (semicolon-separated), CONCURRENT_PAGES, MAX_PROXY_ATTEMPTS, PROXY_RETRY_DELAY_MIN/PROXY_RETRY_DELAY_MAX, BATCH_DELAY_MIN/MAX
 
 // ============================================
 // CONFIGURATION
@@ -8,10 +13,28 @@ const fs = require('fs');
 const SPREADSHEET_ID = '1beJ263B3m4L8pgD9RWsls-orKLUvLMfT2kExaiyNl7g';
 const SHEET_NAME = 'App data'; // Separate sheet for this agent
 const CREDENTIALS_PATH = './credentials.json';
-const CONCURRENT_PAGES = 3; // 3 parallel requests per batch
+const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 3; // 3 parallel requests per batch
 const MAX_WAIT_TIME = 60000;
 const MAX_RETRIES = 3;
 const RETRY_WAIT_MULTIPLIER = 1.5;
+
+// Proxy rotation settings: set env var PROXIES="http://user:pass@host:port;http://..."
+const PROXIES = process.env.PROXIES ? process.env.PROXIES.split(';').map(p => p.trim()).filter(Boolean) : [];
+const MAX_PROXY_ATTEMPTS = parseInt(process.env.MAX_PROXY_ATTEMPTS) || Math.max(3, PROXIES.length);
+const PROXY_RETRY_DELAY_MIN = parseInt(process.env.PROXY_RETRY_DELAY_MIN) || 30000; // 30s
+const PROXY_RETRY_DELAY_MAX = parseInt(process.env.PROXY_RETRY_DELAY_MAX) || 90000; // 90s
+
+// Batch delay range (in ms)
+const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 8000;
+const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 20000;
+
+function pickProxy() {
+    if (!PROXIES.length) return null;
+    return PROXIES[Math.floor(Math.random() * PROXIES.length)];
+}
+
+// Simple in-memory stats to help debug blocking patterns during a run
+const proxyStats = { totalBlocks: 0, perProxy: {} }; 
 
 // Anti-detection: Rotating User Agents
 const USER_AGENTS = [
@@ -200,7 +223,10 @@ async function extractAppData(url, browser, attempt = 1) {
         // ANTI-DETECTION: Short random delay before navigation (1-2 seconds)
         await randomDelay(1000, 2000);
 
-        await page.goto(url, { waitUntil: 'networkidle0', timeout: MAX_WAIT_TIME });
+        // Add language header to look more like a real browser
+        await page.setExtraHTTPHeaders({ 'accept-language': 'en-US,en;q=0.9' });
+
+        const response = await page.goto(url, { waitUntil: 'networkidle0', timeout: MAX_WAIT_TIME });
 
         // 1. Capture the "Advertiser Name" from the main page to use as a blacklist
         const blacklistName = await page.evaluate(() => {
@@ -209,8 +235,14 @@ async function extractAppData(url, browser, attempt = 1) {
         });
 
         const content = await page.content();
-        if (content.includes('Our systems have detected unusual traffic') || content.includes('Too Many Requests')) {
-            console.error('  ⚠️ BLOCKED: Google is detecting unusual traffic. Stopping batch.');
+        // Extra block detection: HTTP 429 or common captcha indicators
+        if ((response && response.status && response.status() === 429) ||
+            content.includes('Our systems have detected unusual traffic') ||
+            content.includes('Too Many Requests') ||
+            content.toLowerCase().includes('captcha') ||
+            content.toLowerCase().includes('g-recaptcha') ||
+            content.toLowerCase().includes('verify you are human')) {
+            console.error('  ⚠️ BLOCKED: Google is detecting unusual traffic or captcha.');
             await page.close();
             return { appName: 'BLOCKED', storeLink: 'BLOCKED' };
         }
@@ -369,15 +401,11 @@ async function extractWithRetry(url, browser) {
 
     console.log(`📋 Found ${toProcess.length} pending URLs in App data\n`);
 
-    const browser = await puppeteer.launch({
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-web-security', '--disable-features=IsolateOrigins,site-per-process']
-    });
+    console.log(PROXIES.length ? `🔁 Proxy rotation enabled (${PROXIES.length} proxies)` : '🔁 Proxy rotation disabled - running direct (no PROXIES env var)');
 
     for (let i = 0; i < toProcess.length; i += CONCURRENT_PAGES) {
         if (Date.now() - sessionStartTime > MAX_RUNTIME) {
             console.log('⏰ Session limit reached. Restarting...');
-            await browser.close();
             await triggerSelfRestart();
             process.exit(0);
         }
@@ -385,31 +413,75 @@ async function extractWithRetry(url, browser) {
         const batch = toProcess.slice(i, i + CONCURRENT_PAGES);
         console.log(`📦 Batch ${Math.floor(i / CONCURRENT_PAGES) + 1}/${Math.ceil(toProcess.length / CONCURRENT_PAGES)}`);
 
-        const results = await Promise.all(batch.map(async (item) => {
-            const data = await extractWithRetry(item.url, browser);
-            return { url: item.url, ...data };
-        }));
+        let proxyAttempts = 0;
+        let handled = false;
 
-        if (results.some(r => r.appName === 'BLOCKED')) {
-            console.log('🛑 Block detected. Restarting for fresh IP...');
-            await browser.close();
-            await triggerSelfRestart();
-            process.exit(0);
+        while (!handled && proxyAttempts < MAX_PROXY_ATTEMPTS) {
+            const proxy = pickProxy();
+            const launchArgs = ['--autoplay-policy=no-user-gesture-required','--disable-blink-features=AutomationControlled','--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'];
+            if (proxy) launchArgs.push(`--proxy-server=${proxy}`);
+
+            console.log(`  🌐 Launching browser (proxy: ${proxy || 'DIRECT'})`);
+            const browser = await puppeteer.launch({ headless: true, args: launchArgs });
+
+            try {
+                const results = await Promise.all(batch.map(async (item) => {
+                    const data = await extractWithRetry(item.url, browser);
+                    return { url: item.url, ...data };
+                }));
+
+                if (results.some(r => r.appName === 'BLOCKED')) {
+                    console.log('  🛑 Block detected on this proxy. Closing browser and rotating proxy...');
+                    // Update simple stats for diagnostics
+                    proxyStats.totalBlocks++;
+                    proxyStats.perProxy[proxy || 'DIRECT'] = (proxyStats.perProxy[proxy || 'DIRECT'] || 0) + 1;
+                    await browser.close();
+                    proxyAttempts++;
+                    if (proxyAttempts >= MAX_PROXY_ATTEMPTS) {
+                        console.log('  ❌ Max proxy attempts reached. Triggering self-restart.');
+                        console.log('  🔍 Proxy stats:', JSON.stringify(proxyStats));
+                        await triggerSelfRestart();
+                        process.exit(0);
+                    }
+                    const wait = PROXY_RETRY_DELAY_MIN + Math.random() * (PROXY_RETRY_DELAY_MAX - PROXY_RETRY_DELAY_MIN);
+                    console.log(`  ⏳ Waiting ${Math.round(wait/1000)}s before next proxy attempt...`);
+                    await new Promise(r => setTimeout(r, wait));
+                    continue; // try next proxy
+                }
+
+                await safeBatchWrite(sheets, results);
+                handled = true;
+                await browser.close();
+            } catch (err) {
+                console.error(`  ❌ Batch error: ${err.message}`);
+                // Track error count for this proxy
+                proxyStats.perProxy[proxy || 'DIRECT'] = (proxyStats.perProxy[proxy || 'DIRECT'] || 0) + 1;
+                try { await browser.close(); } catch (e) { }
+                proxyAttempts++;
+                if (proxyAttempts >= MAX_PROXY_ATTEMPTS) {
+                    console.log('  ❌ Max proxy attempts reached due to errors. Triggering self-restart.');
+                    console.log('  🔍 Proxy stats:', JSON.stringify(proxyStats));
+                    await triggerSelfRestart();
+                    process.exit(0);
+                }
+                const wait = PROXY_RETRY_DELAY_MIN + Math.random() * (PROXY_RETRY_DELAY_MAX - PROXY_RETRY_DELAY_MIN);
+                console.log(`  ⏳ Waiting ${Math.round(wait/1000)}s before next proxy attempt (error)...`);
+                await new Promise(r => setTimeout(r, wait));
+            }
         }
 
-        await safeBatchWrite(sheets, results);
-
-        // Random delay between batches (3-6 seconds)
-        const batchDelay = 3000 + Math.random() * 3000;
+        // Longer random delay between batches to reduce detection risk
+        const batchDelay = BATCH_DELAY_MIN + Math.random() * (BATCH_DELAY_MAX - BATCH_DELAY_MIN);
         console.log(`  ⏳ Waiting ${Math.round(batchDelay / 1000)}s before next batch...`);
         await new Promise(r => setTimeout(r, batchDelay));
     }
 
-    await browser.close();
     const remaining = await getUrlData(sheets);
     if (remaining.length > 0) {
         await triggerSelfRestart();
     }
+
+    console.log('🔍 Proxy stats:', JSON.stringify(proxyStats));
     console.log('\n🏁 Workflow complete.');
     process.exit(0);
 })();
