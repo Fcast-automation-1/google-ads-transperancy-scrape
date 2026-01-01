@@ -310,9 +310,9 @@ async function extractAppData(url, browser, attempt = 1) {
                     const data = { appName: null, storeLink: null, isVideo: false };
                     const root = document.querySelector('#portrait-landscape-phone') || document.body;
 
-                    // Iframe Video Check (Revised Logic: Default to Video, detect Text by size)
+                    // Iframe Video Check (Revised as per User: Small = Text, Large = Video)
                     const checkFrameVideo = () => {
-                        // 1. Explicit Indicators (Strongest Signal)
+                        // 1. Explicit Indicators (Strongest signals for Video)
                         const videoEl = root.querySelector('video');
                         if (videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10) return true;
 
@@ -323,44 +323,59 @@ async function extractAppData(url, browser, attempt = 1) {
                             if (label.toLowerCase().includes('play')) return true;
                         }
 
-                        // 2. Dimension Heuristic for Text Ads
-                        // User Logic: "Text ads only this dimensions... consider other ads as video ads"
-                        // We calculate the bounding box of the ad content (Title + Link).
-                        // If it's small (e.g. < 400x300), it's a Text Ad. Otherwise, assume Video.
+                        // 2. Dimension Heuristic
+                        // "if ads look to small it mean it is text if large and video ads"
 
-                        // Find key elements to measure content size
-                        const titleEl = root.querySelector('a[data-asoch-targets*="ochAppName"], [role="heading"], .app-title');
-                        const linkEl = root.querySelector('a[data-asoch-targets*="ochInstallButton"], .install-button-anchor');
+                        // Collect all relevant content elements to determine the "Visual Size" of the ad
+                        const contentSelectors = [
+                            'a[data-asoch-targets*="ochAppName"]',
+                            '[role="heading"]',
+                            '.app-title',
+                            'a[data-asoch-targets*="ochInstallButton"]',
+                            '.install-button-anchor',
+                            'img', // Include images (icons/screenshots) in the size calc
+                            '.img_ad' // Common class for image ads
+                        ];
 
-                        if (titleEl || linkEl) {
-                            // Get bounds of visible content
-                            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-                            const elements = [titleEl, linkEl].filter(Boolean);
+                        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                        let hasContent = false;
 
-                            elements.forEach(el => {
+                        contentSelectors.forEach(sel => {
+                            root.querySelectorAll(sel).forEach(el => {
                                 const rect = el.getBoundingClientRect();
-                                if (rect.width > 0 && rect.height > 0) {
+                                // Ignore hidden or zero-size elements
+                                if (rect.width > 5 && rect.height > 5) {
+                                    hasContent = true;
                                     minX = Math.min(minX, rect.left);
                                     minY = Math.min(minY, rect.top);
                                     maxX = Math.max(maxX, rect.right);
                                     maxY = Math.max(maxY, rect.bottom);
                                 }
                             });
+                        });
 
-                            if (minX !== Infinity) {
-                                const width = maxX - minX;
-                                const height = maxY - minY;
+                        if (hasContent && minX !== Infinity) {
+                            const contentWidth = maxX - minX;
+                            const contentHeight = maxY - minY;
 
-                                // Heuristic: Text ads are visually compact (Title + Button usually clustered)
-                                // If the content area is small, strictly mark as TEXT AD (not video)
-                                // Threshold: 400px width, 300px height covers typical MREC/Banner text layouts
-                                if (width < 400 && height < 300) {
-                                    return false; // Force NOT Video
-                                }
+                            console.log(`    Detected content size: ${Math.round(contentWidth)}x${Math.round(contentHeight)}`);
+
+                            // CRITERIA:
+                            // Small Card = Text/Image Ad
+                            // Typical Text Ad Card: ~350x150, or 300x250
+                            // Threshold: We'll set a generous cut-off. 
+                            // If it is wider than 480px OR taller than 360px, likely a large format/video.
+                            // If it is smaller than BOTH, it is a Text Ad.
+                            const SMALL_WIDTH_THRESHOLD = 480;
+                            const SMALL_HEIGHT_THRESHOLD = 360;
+
+                            if (contentWidth < SMALL_WIDTH_THRESHOLD && contentHeight < SMALL_HEIGHT_THRESHOLD) {
+                                return false; // Fits in small box -> Text/Image Ad
                             }
                         }
 
                         // Default for everything else (Large ads, Full screen, Unknowns) -> VIDEO AD
+                        // If we couldn't measure content, or content is large, assume Video format.
                         return true;
                     }
                     data.isVideo = checkFrameVideo();
