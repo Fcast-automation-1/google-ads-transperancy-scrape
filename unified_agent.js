@@ -162,17 +162,38 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
     };
     let capturedVideoId = null;
 
-    // Clean name function from app_data_agent.js
+    // Clean name function - removes CSS garbage and normalizes
     const cleanName = (name) => {
         if (!name) return 'NOT_FOUND';
-        let cleaned = name.replace(/[\u200B-\u200D\uFEFF\u2066-\u2069]/g, '').trim();
-        cleaned = cleaned.split('!@~!@~')[0].trim();
+        let cleaned = name.trim();
+
+        // Remove invisible unicode
+        cleaned = cleaned.replace(/[\u200B-\u200D\uFEFF\u2066-\u2069]/g, '');
+
+        // Remove CSS-like patterns
+        cleaned = cleaned.replace(/[a-zA-Z-]+\s*:\s*[^;]+;?/g, ' ');
+        cleaned = cleaned.replace(/\d+px/g, ' ');
+        cleaned = cleaned.replace(/\*+/g, ' ');
+        cleaned = cleaned.replace(/\.[a-zA-Z][\w-]*/g, ' ');
+
+        // Remove special markers
+        cleaned = cleaned.split('!@~!@~')[0];
         if (cleaned.includes('|')) {
-            const parts = cleaned.split('|').map(p => p.trim()).filter(p => p.length > 0);
-            const uniqueParts = [...new Set(parts)];
-            cleaned = uniqueParts[0];
+            cleaned = cleaned.split('|')[0];
         }
-        return cleaned;
+
+        // Normalize whitespace
+        cleaned = cleaned.replace(/\s+/g, ' ').trim();
+
+        // Length check
+        if (cleaned.length < 2 || cleaned.length > 80) return 'NOT_FOUND';
+
+        // Reject if looks like CSS
+        if (/:\s*\d/.test(cleaned) || cleaned.includes('height') || cleaned.includes('width') || cleaned.includes('font')) {
+            return 'NOT_FOUND';
+        }
+
+        return cleaned || 'NOT_FOUND';
     };
 
     // ANTI-DETECTION from app_data_agent.js
@@ -329,11 +350,42 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 
                         const cleanAppName = (text) => {
                             if (!text || typeof text !== 'string') return null;
-                            let clean = text.trim().replace(/[\u200B-\u200D\uFEFF]/g, '');
-                            const badWords = ['ad details', 'install', 'download', 'google ads', 'visit site', 'open', 'play'];
-                            if (badWords.some(w => clean.toLowerCase().includes(w)) && clean.length < 15) return null;
+                            let clean = text.trim();
+
+                            // Remove invisible unicode characters
+                            clean = clean.replace(/[\u200B-\u200D\uFEFF\u2066-\u2069]/g, '');
+
+                            // Remove CSS-like patterns (font-size, line-height, etc.)
+                            clean = clean.replace(/[a-zA-Z-]+\s*:\s*[^;]+;?/g, ' ');
+                            clean = clean.replace(/\d+px/g, ' ');
+                            clean = clean.replace(/\*+/g, ' ');
+                            clean = clean.replace(/\.[a-zA-Z][\w-]*/g, ' '); // CSS class selectors
+
+                            // Remove special markers
+                            clean = clean.split('!@~!@~')[0];
+                            if (clean.includes('|')) {
+                                clean = clean.split('|')[0];
+                            }
+
+                            // Normalize whitespace
+                            clean = clean.replace(/\s+/g, ' ').trim();
+
+                            // Reject if too short or too long
+                            if (clean.length < 2 || clean.length > 80) return null;
+
+                            // Reject if mostly numbers/symbols
+                            if (/^[\d\s\W]+$/.test(clean)) return null;
+
+                            // Reject common garbage words
+                            const badWords = ['ad details', 'install', 'download', 'google ads', 'visit site', 'open', 'play', 'get it on', 'available on'];
+                            if (badWords.some(w => clean.toLowerCase().includes(w)) && clean.length < 20) return null;
+
+                            // Reject if it looks like CSS (contains colons followed by values)
+                            if (/:\s*\d/.test(clean) || clean.includes('height') || clean.includes('width') || clean.includes('font')) return null;
+
                             if (clean.toLowerCase() === blacklist) return null;
-                            return clean.split('|')[0].split('!@~!@~')[0].trim();
+
+                            return clean;
                         };
 
                         // 1. Scan ALL links for store patterns
@@ -402,15 +454,16 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         }
 
         // =====================================================
-        // PHASE 2: VIDEO ID EXTRACTION (from agent.js)
-        // Done on SAME page, no second visit needed
+        // PHASE 2: VIDEO ID EXTRACTION
+        // ONLY extract video ID if we have a valid store link
         // =====================================================
         const finalStoreLink = result.storeLink !== 'SKIP' ? result.storeLink : existingStoreLink;
         const hasValidLink = finalStoreLink &&
             finalStoreLink !== 'NOT_FOUND' &&
             (finalStoreLink.includes('play.google.com') || finalStoreLink.includes('apps.apple.com'));
 
-        if (needsVideoId || (needsMetadata && hasValidLink)) {
+        // Only try to extract video ID if there's a valid app store link
+        if (hasValidLink && (needsVideoId || needsMetadata)) {
             console.log(`  🎬 Extracting Video ID...`);
 
             // Find and click play button (EXACT from agent.js)
