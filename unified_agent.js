@@ -321,21 +321,39 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             for (const frame of frames) {
                 try {
                     const frameData = await frame.evaluate((blacklist) => {
-                        const data = { appName: null, storeLink: null };
+                        const data = { appName: null, storeLink: null, isVideo: false };
+                        const root = document.querySelector('#portrait-landscape-phone') || document.body;
 
+                        // Check if this frame content is visible (has dimensions)
+                        const bodyRect = document.body.getBoundingClientRect();
+                        if (bodyRect.width < 50 || bodyRect.height < 50) {
+                            return { ...data, isHidden: true };
+                        }
+
+                        // =====================================================
+                        // ULTRA-PRECISE STORE LINK EXTRACTOR
+                        // Only accepts REAL Play Store / App Store links
+                        // =====================================================
                         const extractStoreLink = (href) => {
                             if (!href || typeof href !== 'string') return null;
+                            if (href.includes('javascript:') || href === '#') return null;
+
                             const isValidStoreLink = (url) => {
                                 if (!url) return false;
-                                return (url.includes('play.google.com/store/apps/details') && url.includes('id=')) ||
-                                    ((url.includes('apps.apple.com') || url.includes('itunes.apple.com')) && url.includes('/app/'));
+                                const isPlayStore = url.includes('play.google.com/store/apps') && url.includes('id=');
+                                const isAppStore = (url.includes('apps.apple.com') || url.includes('itunes.apple.com')) && url.includes('/app/');
+                                return isPlayStore || isAppStore;
                             };
+
                             if (isValidStoreLink(href)) return href;
 
-                            // Check for adurl in redirects
-                            if (href.includes('adurl=') || href.includes('dest=') || href.includes('url=')) {
+                            if (href.includes('googleadservices.com') || href.includes('/pagead/aclk')) {
                                 try {
-                                    const patterns = [/[?&]adurl=([^&\s]+)/i, /[?&]dest=([^&\s]+)/i, /[?&]url=([^&\s]+)/i];
+                                    const patterns = [
+                                        /[?&]adurl=([^&\s]+)/i,
+                                        /[?&]dest=([^&\s]+)/i,
+                                        /[?&]url=([^&\s]+)/i
+                                    ];
                                     for (const pattern of patterns) {
                                         const match = href.match(pattern);
                                         if (match && match[1]) {
@@ -345,82 +363,95 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                     }
                                 } catch (e) { }
                             }
+
+                            try {
+                                const playMatch = href.match(/(https?:\/\/play\.google\.com\/store\/apps\/details\?id=[a-zA-Z0-9._]+)/);
+                                if (playMatch && playMatch[1]) return playMatch[1];
+                                const appMatch = href.match(/(https?:\/\/(apps|itunes)\.apple\.com\/[^\s&"']+\/app\/[^\s&"']+)/);
+                                if (appMatch && appMatch[1]) return appMatch[1];
+                            } catch (e) { }
+
                             return null;
                         };
 
+                        // =====================================================
+                        // CLEAN APP NAME
+                        // =====================================================
                         const cleanAppName = (text) => {
                             if (!text || typeof text !== 'string') return null;
                             let clean = text.trim();
-
-                            // Remove invisible unicode characters
                             clean = clean.replace(/[\u200B-\u200D\uFEFF\u2066-\u2069]/g, '');
-
-                            // Remove CSS-like patterns (font-size, line-height, etc.)
-                            clean = clean.replace(/[a-zA-Z-]+\s*:\s*[^;]+;?/g, ' ');
-                            clean = clean.replace(/\d+px/g, ' ');
-                            clean = clean.replace(/\*+/g, ' ');
-                            clean = clean.replace(/\.[a-zA-Z][\w-]*/g, ' '); // CSS class selectors
-
-                            // Remove special markers
+                            clean = clean.replace(/\.[a-zA-Z][\w-]*/g, ' ');
+                            clean = clean.replace(/[a-zA-Z-]+\s*:\s*[^;]+;/g, ' ');
                             clean = clean.split('!@~!@~')[0];
                             if (clean.includes('|')) {
-                                clean = clean.split('|')[0];
+                                const parts = clean.split('|').map(p => p.trim()).filter(p => p.length > 2);
+                                if (parts.length > 0) clean = parts[0];
                             }
-
-                            // Normalize whitespace
                             clean = clean.replace(/\s+/g, ' ').trim();
-
-                            // Reject if too short or too long
                             if (clean.length < 2 || clean.length > 80) return null;
-
-                            // Reject if mostly numbers/symbols
                             if (/^[\d\s\W]+$/.test(clean)) return null;
-
-                            // Reject common garbage words
-                            const badWords = ['ad details', 'install', 'download', 'google ads', 'visit site', 'open', 'play', 'get it on', 'available on'];
-                            if (badWords.some(w => clean.toLowerCase().includes(w)) && clean.length < 20) return null;
-
-                            // Reject if it looks like CSS (contains colons followed by values)
-                            if (/:\s*\d/.test(clean) || clean.includes('height') || clean.includes('width') || clean.includes('font')) return null;
-
-                            if (clean.toLowerCase() === blacklist) return null;
-
                             return clean;
                         };
 
-                        // 1. Scan ALL links for store patterns
-                        const allLinks = Array.from(document.querySelectorAll('a'));
-                        for (const link of allLinks) {
-                            const linkHref = link.href;
-                            const extracted = extractStoreLink(linkHref);
-                            if (extracted) {
-                                data.storeLink = extracted;
+                        // =====================================================
+                        // EXTRACTION - Find FIRST element with BOTH name + store link
+                        // Uses PRECISE selectors from app_data_agent.js
+                        // =====================================================
+                        const appNameSelectors = [
+                            'a[data-asoch-targets*="ochAppName"]',
+                            'a[data-asoch-targets*="appname" i]',
+                            'a[data-asoch-targets*="rrappname" i]',
+                            'a[class*="short-app-name"]',
+                            '.short-app-name a'
+                        ];
 
-                                // Try to get name from common app name nearby or data-attributes
-                                const nameAttr = link.getAttribute('data-asoch-targets');
-                                if (nameAttr && (nameAttr.includes('AppName') || nameAttr.includes('appname'))) {
-                                    const cleaned = cleanAppName(link.innerText || link.textContent);
-                                    if (cleaned) data.appName = cleaned;
+                        for (const selector of appNameSelectors) {
+                            const elements = root.querySelectorAll(selector);
+                            for (const el of elements) {
+                                const rawName = el.innerText || el.textContent || '';
+                                const appName = cleanAppName(rawName);
+                                if (!appName || appName.toLowerCase() === blacklist) continue;
+
+                                const storeLink = extractStoreLink(el.href);
+                                if (appName && storeLink) {
+                                    return { appName, storeLink, isVideo: true, isHidden: false };
+                                } else if (appName && !data.appName) {
+                                    data.appName = appName;
                                 }
                             }
                         }
 
-                        // 2. Scan structured selectors for App Name if not found
-                        if (!data.appName) {
-                            const nameSels = [
-                                'a[data-asoch-targets*="AppName"]',
-                                'a[data-asoch-targets*="appname" i]',
-                                '.short-app-name',
-                                'div[class*="app-name"]',
-                                '[role="heading"]',
-                                '.app-title'
+                        // Backup: Install button for link
+                        if (data.appName && !data.storeLink) {
+                            const installSels = [
+                                'a[data-asoch-targets*="ochButton"]',
+                                'a[data-asoch-targets*="Install" i]',
+                                'a[aria-label*="Install" i]'
                             ];
-                            for (const sel of nameSels) {
-                                const els = document.querySelectorAll(sel);
-                                for (const el of els) {
-                                    const cleaned = cleanAppName(el.innerText || el.textContent);
-                                    if (cleaned) {
-                                        data.appName = cleaned;
+                            for (const sel of installSels) {
+                                const el = root.querySelector(sel);
+                                if (el && el.href) {
+                                    const storeLink = extractStoreLink(el.href);
+                                    if (storeLink) {
+                                        data.storeLink = storeLink;
+                                        data.isVideo = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Fallback for app name only
+                        if (!data.appName) {
+                            const textSels = ['[role="heading"]', 'div[class*="app-name"]', '.app-title'];
+                            for (const sel of textSels) {
+                                const elements = root.querySelectorAll(sel);
+                                for (const el of elements) {
+                                    const rawName = el.innerText || el.textContent || '';
+                                    const appName = cleanAppName(rawName);
+                                    if (appName && appName.toLowerCase() !== blacklist) {
+                                        data.appName = appName;
                                         break;
                                     }
                                 }
@@ -428,17 +459,26 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                             }
                         }
 
+                        data.isHidden = false;
                         return data;
                     }, blacklistName);
 
-                    if (frameData.appName && !result.appName || result.appName === 'NOT_FOUND') {
-                        if (frameData.appName) result.appName = cleanName(frameData.appName);
-                    }
-                    if (frameData.storeLink && (result.storeLink === 'NOT_FOUND' || result.storeLink === 'SKIP')) {
+                    // Skip hidden frames
+                    if (frameData.isHidden) continue;
+
+                    // If we found BOTH app name AND store link, use this immediately (high confidence)
+                    if (frameData.appName && frameData.storeLink && result.appName === 'NOT_FOUND') {
+                        result.appName = cleanName(frameData.appName);
                         result.storeLink = frameData.storeLink;
+                        console.log(`  ✓ Found: ${result.appName} -> ${result.storeLink.substring(0, 60)}...`);
+                        break; // We have both, stop searching
                     }
 
-                    if (result.appName !== 'NOT_FOUND' && result.storeLink !== 'NOT_FOUND') break;
+                    // If we only found name (no link), store it but keep looking
+                    if (frameData.appName && !frameData.storeLink && result.appName === 'NOT_FOUND') {
+                        result.appName = cleanName(frameData.appName);
+                        // DON'T break - continue looking for a frame with BOTH name+link
+                    }
                 } catch (e) { }
             }
 
