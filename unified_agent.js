@@ -9,6 +9,7 @@
  *   Column C: App Link
  *   Column D: App Name
  *   Column E: Video ID
+ *   Column M: Timestamp
  */
 
 // EXACT IMPORTS FROM app_data_agent.js
@@ -133,6 +134,10 @@ async function batchWriteToSheet(sheets, updates) {
         if (videoId && videoId !== 'SKIP') {
             data.push({ range: `${SHEET_NAME}!E${rowNum}`, values: [[videoId]] });
         }
+
+        // Write Timestamp to Column M
+        const timestamp = new Date().toLocaleString();
+        data.push({ range: `${SHEET_NAME}!M${rowNum}`, values: [[timestamp]] });
     });
 
     if (data.length === 0) return;
