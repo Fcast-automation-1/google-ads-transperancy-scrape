@@ -53,7 +53,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          CONCURRENT_PAGES: 2
+          CONCURRENT_PAGES: 5
 
       - name: Cleanup credentials
         if: always()

@@ -24,14 +24,14 @@ const fs = require('fs');
 const SPREADSHEET_ID = '1l4JpCcA1GSkta1CE77WxD_YCgePHI87K7NtMu1Sd4Q0';
 const SHEET_NAME = 'Sheet1';
 const CREDENTIALS_PATH = './credentials.json';
-const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 2;
+const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 5; // Increased for speed
 const MAX_WAIT_TIME = 60000;
 const MAX_RETRIES = 3;
-const POST_CLICK_WAIT = 12000;
-const RETRY_WAIT_MULTIPLIER = 1.5;
+const POST_CLICK_WAIT = 8000; // Reduced from 12s
+const RETRY_WAIT_MULTIPLIER = 1.3; // Reduced from 1.5
 
-const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 8000;
-const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 20000;
+const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 2000; // Reduced from 8s
+const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 5000; // Reduced from 20s
 
 const PROXIES = process.env.PROXIES ? process.env.PROXIES.split(';').map(p => p.trim()).filter(Boolean) : [];
 const MAX_PROXY_ATTEMPTS = parseInt(process.env.MAX_PROXY_ATTEMPTS) || Math.max(3, PROXIES.length);
@@ -189,12 +189,12 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
     });
 
-    // VIDEO ID CAPTURE from agent.js - set up BEFORE navigation
+    // VIDEO ID CAPTURE + SPEED OPTIMIZATION
     await page.setRequestInterception(true);
     page.on('request', (request) => {
         const requestUrl = request.url();
 
-        // Capture video ID from googlevideo.com requests (EXACT from agent.js)
+        // Capture video ID from googlevideo.com requests
         if (requestUrl.includes('googlevideo.com/videoplayback')) {
             const urlParams = new URLSearchParams(requestUrl.split('?')[1]);
             const id = urlParams.get('id');
@@ -204,7 +204,14 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         }
 
         const resourceType = request.resourceType();
-        if (['image', 'font'].includes(resourceType)) {
+        // Abort more resource types for speed: image, font, media (except video id capture), and tracking
+        const blockedTypes = ['image', 'font', 'other'];
+        const blockedPatterns = [
+            'analytics', 'google-analytics', 'doubleclick', 'pagead',
+            'facebook.com', 'bing.com', 'logs', 'collect'
+        ];
+
+        if (blockedTypes.includes(resourceType) || blockedPatterns.some(p => requestUrl.includes(p))) {
             request.abort();
         } else {
             request.continue();
@@ -214,10 +221,10 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
     try {
         console.log(`  🚀 Loading (${viewport.width}x${viewport.height}): ${url.substring(0, 50)}...`);
 
-        await randomDelay(1000, 2000);
         await page.setExtraHTTPHeaders({ 'accept-language': 'en-US,en;q=0.9' });
 
-        const response = await page.goto(url, { waitUntil: 'networkidle0', timeout: MAX_WAIT_TIME });
+        // Reduced WAIT_UNTIL to domcontentloaded for faster start, then wait for network if needed
+        const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: MAX_WAIT_TIME });
 
         // Block detection from app_data_agent.js
         const content = await page.content();
@@ -232,8 +239,8 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             return { advertiserName: 'BLOCKED', appName: 'BLOCKED', storeLink: 'BLOCKED', videoId: 'BLOCKED' };
         }
 
-        // Wait with jitter
-        const baseWait = 3000 + Math.random() * 2000;
+        // Wait with jitter (Reduced for speed)
+        const baseWait = 1500 + Math.random() * 1500;
         const attemptMultiplier = Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
         await sleep(baseWait * attemptMultiplier);
 
