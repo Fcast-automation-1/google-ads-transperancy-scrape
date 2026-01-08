@@ -1,11 +1,12 @@
-name: Dual Google Ads Agent (Top + Bottom)
+name: Dual Google Ads Agent (DISABLED - Using separate workflows)
 
+# DISABLED: Now using unified-workflow.yml (forward) and unified-reverse-workflow.yml (reverse) independently
 on:
-  schedule:
-    - cron: '0 0 * * *'   # 5:00 AM PKT
-    - cron: '0 6 * * *'   # 11:00 AM PKT
-    - cron: '0 12 * * *'  # 5:00 PM PKT
-    - cron: '0 18 * * *'  # 11:00 PM PKT
+  # schedule:
+  #   - cron: '0 0 * * *'   # 5:00 AM PKT
+  #   - cron: '0 6 * * *'   # 11:00 AM PKT
+  #   - cron: '0 12 * * *'  # 5:00 PM PKT
+  #   - cron: '0 18 * * *'  # 11:00 PM PKT
   workflow_dispatch:
 
 concurrency:

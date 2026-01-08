@@ -1,4 +1,4 @@
-name: Unified Google Ads Agent (FORWARD)
+name: Unified Google Ads Agent (REVERSE)
 
 on:
   schedule:
@@ -9,11 +9,11 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: unified-agent-group
+  group: unified-agent-reverse-group
   cancel-in-progress: false
 
 jobs:
-  run-unified-agent:
+  run-unified-agent-reverse:
     runs-on: ubuntu-latest
     timeout-minutes: 355 # 5 hours 55 minutes
     
@@ -37,19 +37,19 @@ jobs:
       
       - name: Create credentials file
         run: |
-          cat > credentials.json << EOF
+          cat > credentials.json <<EOF
           ${{ secrets.GOOGLE_CREDENTIALS }}
           EOF
         shell: bash
       
       - name: Log run start
         run: |
-          echo "🚀 Starting UNIFIED Google Ads Agent at $(date)"
+          echo "🚀 Starting UNIFIED Google Ads Agent (REVERSE - Bottom to Top) at $(date)"
           echo "📊 System environment: $(uname -a)"
       
-      - name: Run unified agent script
+      - name: Run unified agent REVERSE script
         id: run_script
-        run: node unified_agent.js
+        run: node unified_agent_reverse.js
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
