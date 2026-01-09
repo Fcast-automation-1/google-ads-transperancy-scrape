@@ -1,12 +1,17 @@
 name: Unified Google Ads Agent (FORWARD)
 
 on:
-  schedule:
-    - cron: '0 0 * * *'   # 5:00 AM PKT
-    - cron: '0 6 * * *'   # 11:00 AM PKT
-    - cron: '0 12 * * *'  # 5:00 PM PKT
-    - cron: '0 18 * * *'  # 11:00 PM PKT
+  # Manual trigger
   workflow_dispatch:
+  
+  # Auto-restart: Trigger when this workflow completes (24/7 continuous)
+  workflow_run:
+    workflows: ["Unified Google Ads Agent (FORWARD)"]
+    types:
+      - completed
+    branches:
+      - main
+      - master
 
 concurrency:
   group: unified-agent-group
@@ -58,3 +63,17 @@ jobs:
       - name: Cleanup credentials
         if: always()
         run: rm -f credentials.json
+      
+      - name: Wait 5 minutes then restart workflow
+        if: always() && github.event_name != 'workflow_run'
+        run: |
+          echo "⏳ Waiting 5 minutes before restarting workflow..."
+          sleep 300
+          echo "🔄 Triggering workflow restart..."
+          curl -X POST \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/unified-workflow.yml/dispatches \
+            -d '{"ref":"${{ github.ref }}"}'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -14,9 +14,14 @@ on:
   repository_dispatch:
     types: [sheet_update]
   
-  # Schedule (optional - runs every 6 hours)
-  schedule:
-    - cron: '0 */6 * * *'
+  # Auto-restart: Trigger when this workflow completes (24/7 continuous)
+  workflow_run:
+    workflows: ["Unified Google Ads Agent"]
+    types:
+      - completed
+    branches:
+      - main
+      - master
 
 jobs:
   scrape:
@@ -77,3 +82,17 @@ jobs:
             *.log
             npm-debug.log*
           retention-days: 7
+      
+      - name: Wait 5 minutes then restart workflow
+        if: always() && github.event_name != 'workflow_run'
+        run: |
+          echo "⏳ Waiting 5 minutes before restarting workflow..."
+          sleep 300
+          echo "🔄 Triggering workflow restart..."
+          curl -X POST \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/unified-agent.yml/dispatches \
+            -d '{"ref":"${{ github.ref }}"}'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
