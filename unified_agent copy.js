@@ -25,14 +25,16 @@ const fs = require('fs');
 const SPREADSHEET_ID = '1l4JpCcA1GSkta1CE77WxD_YCgePHI87K7NtMu1Sd4Q0';
 const SHEET_NAME = process.env.SHEET_NAME || 'Test data'; // Can be overridden via env var
 const CREDENTIALS_PATH = './credentials.json';
-const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 8; // Increased for speed
+const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 5; // Balanced: faster but safe
 const MAX_WAIT_TIME = 60000;
 const MAX_RETRIES = 4;
-const POST_CLICK_WAIT = 6000; // Reduced from 8s
-const RETRY_WAIT_MULTIPLIER = 1.25; // Smoother retry scaling
+const POST_CLICK_WAIT = 6000;
+const RETRY_WAIT_MULTIPLIER = 1.25;
+const PAGE_LOAD_DELAY_MIN = parseInt(process.env.PAGE_LOAD_DELAY_MIN) || 1000; // Faster staggered starts
+const PAGE_LOAD_DELAY_MAX = parseInt(process.env.PAGE_LOAD_DELAY_MAX) || 3000;
 
-const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 3000; // Faster batches
-const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 6000; // Faster batches
+const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 5000; // Balanced: faster but safe
+const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 10000; // Balanced: faster but safe
 
 const PROXIES = process.env.PROXIES ? process.env.PROXIES.split(';').map(p => p.trim()).filter(Boolean) : [];
 const MAX_PROXY_ATTEMPTS = parseInt(process.env.MAX_PROXY_ATTEMPTS) || Math.max(3, PROXIES.length);
@@ -279,8 +281,8 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             return { advertiserName: 'BLOCKED', appName: 'BLOCKED', storeLink: 'BLOCKED', videoId: 'BLOCKED' };
         }
 
-        // Wait for dynamic elements to settle (reduced for speed)
-        const baseWait = 2500 + Math.random() * 2000;
+        // Wait for dynamic elements to settle (balanced for speed and safety)
+        const baseWait = 3000 + Math.random() * 2000; // Balanced: 3000-5000ms
         const attemptMultiplier = Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
         await sleep(baseWait * attemptMultiplier);
 
@@ -338,11 +340,16 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             };
         }
 
-        // Faster interaction
+        // Human-like interaction (optimized for speed while staying safe)
         await page.evaluate(async () => {
-            window.scrollBy(0, 200);
-            await new Promise(r => setTimeout(r, 200));
+            // Quick but natural scrolling
+            for (let i = 0; i < 3; i++) {
+                window.scrollBy(0, 150 + Math.random() * 100);
+                await new Promise(r => setTimeout(r, 200 + Math.random() * 150));
+            }
+            // Scroll back up a bit
             window.scrollBy(0, -100);
+            await new Promise(r => setTimeout(r, 250));
         });
 
         // =====================================================
@@ -760,7 +767,7 @@ async function extractWithRetry(item, browser) {
 
     console.log(PROXIES.length ? `🔁 Proxy rotation enabled (${PROXIES.length} proxies)` : '🔁 Running direct');
 
-    const PAGES_PER_BROWSER = 40;
+        const PAGES_PER_BROWSER = 30; // Balanced: faster but safe
     let currentIndex = 0;
 
     while (currentIndex < toProcess.length) {
@@ -812,6 +819,8 @@ async function extractWithRetry(item, browser) {
 
         let sessionProcessed = 0;
         let blocked = false;
+        // Reset adaptive counter for each browser session
+        consecutiveSuccessBatches = 0;
 
         while (sessionProcessed < currentSessionSize && !blocked) {
             const batchSize = Math.min(CONCURRENT_PAGES, currentSessionSize - sessionProcessed);
@@ -820,7 +829,13 @@ async function extractWithRetry(item, browser) {
             console.log(`📦 Batch ${currentIndex + 1}-${currentIndex + batchSize} / ${toProcess.length}`);
 
             try {
-                const results = await Promise.all(batch.map(async (item) => {
+                // Stagger page loads to avoid blocks - add delay between each concurrent page
+                const results = await Promise.all(batch.map(async (item, index) => {
+                    // Add random delay before starting each page (staggered)
+                    if (index > 0) {
+                        const staggerDelay = PAGE_LOAD_DELAY_MIN + Math.random() * (PAGE_LOAD_DELAY_MAX - PAGE_LOAD_DELAY_MIN);
+                        await sleep(staggerDelay * index); // Each page waits progressively longer
+                    }
                     const data = await extractWithRetry(item, browser);
                     return {
                         rowIndex: item.rowIndex,
@@ -835,16 +850,30 @@ async function extractWithRetry(item, browser) {
                     console.log(`  → Row ${r.rowIndex + 1}: Advertiser=${r.advertiserName} | Link=${r.storeLink?.substring(0, 40) || 'SKIP'}... | Name=${r.appName} | Video=${r.videoId}`);
                 });
 
-                if (results.some(r => r.storeLink === 'BLOCKED' || r.appName === 'BLOCKED')) {
-                    console.log('  🛑 Block detected. Closing browser and rotating...');
+                // Separate successful results from blocked ones
+                const successfulResults = results.filter(r => r.storeLink !== 'BLOCKED' && r.appName !== 'BLOCKED');
+                const blockedResults = results.filter(r => r.storeLink === 'BLOCKED' || r.appName === 'BLOCKED');
+
+                // Always write successful results to sheet (even if some were blocked)
+                if (successfulResults.length > 0) {
+                    await batchWriteToSheet(sheets, successfulResults);
+                    console.log(`  ✅ Wrote ${successfulResults.length} successful results to sheet`);
+                }
+
+                // If any results were blocked, mark for browser rotation
+                if (blockedResults.length > 0) {
+                    console.log(`  🛑 Block detected (${blockedResults.length} blocked, ${successfulResults.length} successful). Closing browser and rotating...`);
                     proxyStats.totalBlocks++;
                     proxyStats.perProxy[proxy || 'DIRECT'] = (proxyStats.perProxy[proxy || 'DIRECT'] || 0) + 1;
                     blocked = true;
+                    consecutiveSuccessBatches = 0; // Reset on block
                 } else {
-                    await batchWriteToSheet(sheets, results);
-                    currentIndex += batchSize;
-                    sessionProcessed += batchSize;
+                    consecutiveSuccessBatches++; // Track successful batches
                 }
+
+                // Update index for all processed items (both successful and blocked)
+                currentIndex += batchSize;
+                sessionProcessed += batchSize;
             } catch (err) {
                 console.error(`  ❌ Batch error: ${err.message}`);
                 currentIndex += batchSize;
@@ -852,8 +881,12 @@ async function extractWithRetry(item, browser) {
             }
 
             if (!blocked) {
-                const batchDelay = BATCH_DELAY_MIN + Math.random() * (BATCH_DELAY_MAX - BATCH_DELAY_MIN);
-                console.log(`  ⏳ Waiting ${Math.round(batchDelay / 1000)}s...`);
+                // Adaptive delay: reduce delay if we're having success (faster processing)
+                const adaptiveMultiplier = Math.max(0.7, 1 - (consecutiveSuccessBatches * 0.05)); // Reduce delay by 5% per successful batch, min 70%
+                const adjustedMin = BATCH_DELAY_MIN * adaptiveMultiplier;
+                const adjustedMax = BATCH_DELAY_MAX * adaptiveMultiplier;
+                const batchDelay = adjustedMin + Math.random() * (adjustedMax - adjustedMin);
+                console.log(`  ⏳ Waiting ${Math.round(batchDelay / 1000)}s... (adaptive: ${Math.round(adaptiveMultiplier * 100)}%)`);
                 await sleep(batchDelay);
             }
         }

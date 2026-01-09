@@ -51,9 +51,11 @@ jobs:
       - name: Run Unified Agent
         env:
           SHEET_NAME: ${{ inputs.sheet_name || secrets.SHEET_NAME || 'Test data' }}
-          CONCURRENT_PAGES: ${{ secrets.CONCURRENT_PAGES || '8' }}
-          BATCH_DELAY_MIN: ${{ secrets.BATCH_DELAY_MIN || '3000' }}
-          BATCH_DELAY_MAX: ${{ secrets.BATCH_DELAY_MAX || '6000' }}
+          CONCURRENT_PAGES: ${{ secrets.CONCURRENT_PAGES || '5' }}
+          BATCH_DELAY_MIN: ${{ secrets.BATCH_DELAY_MIN || '5000' }}
+          BATCH_DELAY_MAX: ${{ secrets.BATCH_DELAY_MAX || '10000' }}
+          PAGE_LOAD_DELAY_MIN: ${{ secrets.PAGE_LOAD_DELAY_MIN || '1000' }}
+          PAGE_LOAD_DELAY_MAX: ${{ secrets.PAGE_LOAD_DELAY_MAX || '3000' }}
           PROXIES: ${{ secrets.PROXIES }}
           MAX_PROXY_ATTEMPTS: ${{ secrets.MAX_PROXY_ATTEMPTS }}
           PROXY_RETRY_DELAY_MIN: ${{ secrets.PROXY_RETRY_DELAY_MIN }}
