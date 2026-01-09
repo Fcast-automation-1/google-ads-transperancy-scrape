@@ -51,10 +51,14 @@ const proxyStats = { totalBlocks: 0, perProxy: {} };
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
 ];
 
 const VIEWPORTS = [
@@ -62,7 +66,10 @@ const VIEWPORTS = [
     { width: 1366, height: 768 },
     { width: 1536, height: 864 },
     { width: 1440, height: 900 },
-    { width: 1280, height: 720 }
+    { width: 1280, height: 720 },
+    { width: 1600, height: 900 },
+    { width: 1920, height: 1200 },
+    { width: 1680, height: 1050 }
 ];
 
 const randomDelay = (min, max) => new Promise(r => setTimeout(r, min + Math.random() * (max - min)));
@@ -203,19 +210,83 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         return cleaned || 'NOT_FOUND';
     };
 
-    // ANTI-DETECTION from app_data_agent.js
+    // ENHANCED ANTI-DETECTION - More comprehensive fingerprint masking
     const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
     await page.setUserAgent(userAgent);
 
     const viewport = VIEWPORTS[Math.floor(Math.random() * VIEWPORTS.length)];
     await page.setViewport(viewport);
 
-    await page.evaluateOnNewDocument(() => {
+    // Random screen properties for more realistic fingerprint
+    const screenWidth = viewport.width + Math.floor(Math.random() * 100) - 50;
+    const screenHeight = viewport.height + Math.floor(Math.random() * 100) - 50;
+
+    await page.evaluateOnNewDocument((screenW, screenH) => {
+        // Remove webdriver flag
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        
+        // Chrome runtime
         window.chrome = { runtime: {} };
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-    });
+        
+        // Plugins
+        Object.defineProperty(navigator, 'plugins', { 
+            get: () => [1, 2, 3, 4, 5],
+            configurable: true
+        });
+        
+        // Languages
+        Object.defineProperty(navigator, 'languages', { 
+            get: () => ['en-US', 'en'],
+            configurable: true
+        });
+        
+        // Platform
+        Object.defineProperty(navigator, 'platform', {
+            get: () => /Win/.test(navigator.userAgent) ? 'Win32' : 
+                       /Mac/.test(navigator.userAgent) ? 'MacIntel' : 'Linux x86_64',
+            configurable: true
+        });
+        
+        // Hardware concurrency (randomize CPU cores)
+        Object.defineProperty(navigator, 'hardwareConcurrency', {
+            get: () => 4 + Math.floor(Math.random() * 4), // 4-8 cores
+            configurable: true
+        });
+        
+        // Device memory (randomize RAM)
+        Object.defineProperty(navigator, 'deviceMemory', {
+            get: () => [4, 8, 16][Math.floor(Math.random() * 3)],
+            configurable: true
+        });
+        
+        // Screen properties
+        Object.defineProperty(screen, 'width', { get: () => screenW, configurable: true });
+        Object.defineProperty(screen, 'height', { get: () => screenH, configurable: true });
+        Object.defineProperty(screen, 'availWidth', { get: () => screenW, configurable: true });
+        Object.defineProperty(screen, 'availHeight', { get: () => screenH - 40, configurable: true });
+        
+        // Permissions
+        const originalQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (parameters) => (
+            parameters.name === 'notifications' ?
+                Promise.resolve({ state: Notification.permission }) :
+                originalQuery(parameters)
+        );
+        
+        // Canvas fingerprint protection (add noise)
+        const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+        HTMLCanvasElement.prototype.toDataURL = function() {
+            const context = this.getContext('2d');
+            if (context) {
+                const imageData = context.getImageData(0, 0, this.width, this.height);
+                for (let i = 0; i < imageData.data.length; i += 4) {
+                    imageData.data[i] += Math.random() * 0.01 - 0.005; // Tiny noise
+                }
+                context.putImageData(imageData, 0, 0);
+            }
+            return originalToDataURL.apply(this, arguments);
+        };
+    }, screenWidth, screenHeight);
 
     // VIDEO ID CAPTURE + SPEED OPTIMIZATION
     await page.setRequestInterception(true);
@@ -264,7 +335,37 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
     try {
         console.log(`  🚀 Loading (${viewport.width}x${viewport.height}): ${url.substring(0, 50)}...`);
 
-        await page.setExtraHTTPHeaders({ 'accept-language': 'en-US,en;q=0.9' });
+        // Random mouse movement before page load (more human-like)
+        try {
+            const client = await page.target().createCDPSession();
+            await client.send('Input.dispatchMouseEvent', {
+                type: 'mouseMoved',
+                x: Math.random() * viewport.width,
+                y: Math.random() * viewport.height
+            });
+        } catch (e) { /* Ignore if CDP not ready */ }
+
+        // Enhanced headers with randomization
+        const acceptLanguages = [
+            'en-US,en;q=0.9',
+            'en-US,en;q=0.9,zh-CN;q=0.8',
+            'en-US,en;q=0.9,fr;q=0.8',
+            'en-GB,en;q=0.9',
+            'en-US,en;q=0.9,es;q=0.8'
+        ];
+        await page.setExtraHTTPHeaders({ 
+            'accept-language': acceptLanguages[Math.floor(Math.random() * acceptLanguages.length)],
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'accept-encoding': 'gzip, deflate, br',
+            'sec-ch-ua': `"Not_A Brand";v="8", "Chromium";v="${120 + Math.floor(Math.random() * 2)}", "Google Chrome";v="${120 + Math.floor(Math.random() * 2)}"`,
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': `"${/Win/.test(userAgent) ? 'Windows' : /Mac/.test(userAgent) ? 'macOS' : 'Linux'}"`,
+            'sec-fetch-dest': 'document',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'none',
+            'sec-fetch-user': '?1',
+            'upgrade-insecure-requests': '1'
+        });
 
         // Increased wait strategy for accuracy - iframes need time to render content
         const response = await page.goto(url, { waitUntil: 'networkidle2', timeout: MAX_WAIT_TIME });
@@ -285,6 +386,20 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         const baseWait = 3000 + Math.random() * 2000; // Balanced: 3000-5000ms
         const attemptMultiplier = Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
         await sleep(baseWait * attemptMultiplier);
+
+        // Random mouse movements for more human-like behavior
+        try {
+            const client = await page.target().createCDPSession();
+            const movements = 2 + Math.floor(Math.random() * 3); // 2-4 movements
+            for (let i = 0; i < movements; i++) {
+                await client.send('Input.dispatchMouseEvent', {
+                    type: 'mouseMoved',
+                    x: Math.random() * viewport.width,
+                    y: Math.random() * viewport.height
+                });
+                await sleep(200 + Math.random() * 300);
+            }
+        } catch (e) { /* Ignore if CDP fails */ }
 
         // =====================================================
         // EARLY TEXT AD DETECTION - Skip text ads entirely
@@ -342,15 +457,25 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 
         // Human-like interaction (optimized for speed while staying safe)
         await page.evaluate(async () => {
-            // Quick but natural scrolling
+            // Quick but natural scrolling with random pauses
             for (let i = 0; i < 3; i++) {
                 window.scrollBy(0, 150 + Math.random() * 100);
                 await new Promise(r => setTimeout(r, 200 + Math.random() * 150));
+                // Random pause sometimes (30% chance)
+                if (Math.random() < 0.3) {
+                    await new Promise(r => setTimeout(r, 300 + Math.random() * 200));
+                }
             }
             // Scroll back up a bit
             window.scrollBy(0, -100);
             await new Promise(r => setTimeout(r, 250));
         });
+
+        // Random pause before extraction (10-30% chance, adds randomness)
+        if (Math.random() < 0.2) {
+            const randomPause = 500 + Math.random() * 1000;
+            await sleep(randomPause);
+        }
 
         // =====================================================
         // PHASE 1: METADATA EXTRACTION
@@ -649,11 +774,46 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             if (playButtonInfo.found) {
                 try {
                     const client = await page.target().createCDPSession();
-                    await client.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: playButtonInfo.x, y: playButtonInfo.y });
-                    await sleep(100);
-                    await client.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: playButtonInfo.x, y: playButtonInfo.y, button: 'left', clickCount: 1 });
-                    await sleep(80);
-                    await client.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: playButtonInfo.x, y: playButtonInfo.y, button: 'left', clickCount: 1 });
+                    
+                    // More human-like mouse movement: gradual approach to button
+                    const startX = Math.random() * viewport.width;
+                    const startY = Math.random() * viewport.height;
+                    const steps = 3 + Math.floor(Math.random() * 3); // 3-5 steps
+                    
+                    for (let i = 0; i <= steps; i++) {
+                        const progress = i / steps;
+                        const currentX = startX + (playButtonInfo.x - startX) * progress;
+                        const currentY = startY + (playButtonInfo.y - startY) * progress;
+                        await client.send('Input.dispatchMouseEvent', { 
+                            type: 'mouseMoved', 
+                            x: currentX, 
+                            y: currentY 
+                        });
+                        await sleep(50 + Math.random() * 50); // Variable speed
+                    }
+                    
+                    // Hover briefly before clicking (more human-like)
+                    await sleep(150 + Math.random() * 100);
+                    
+                    // Click with slight randomness in position
+                    const clickX = playButtonInfo.x + (Math.random() - 0.5) * 5;
+                    const clickY = playButtonInfo.y + (Math.random() - 0.5) * 5;
+                    
+                    await client.send('Input.dispatchMouseEvent', { 
+                        type: 'mousePressed', 
+                        x: clickX, 
+                        y: clickY, 
+                        button: 'left', 
+                        clickCount: 1 
+                    });
+                    await sleep(80 + Math.random() * 40);
+                    await client.send('Input.dispatchMouseEvent', { 
+                        type: 'mouseReleased', 
+                        x: clickX, 
+                        y: clickY, 
+                        button: 'left', 
+                        clickCount: 1 
+                    });
 
                     // Wait for video to load (poll for capturedVideoId)
                     const waitTime = POST_CLICK_WAIT * Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
