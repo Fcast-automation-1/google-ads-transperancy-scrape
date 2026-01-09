@@ -14,14 +14,7 @@ on:
   repository_dispatch:
     types: [sheet_update]
   
-  # Auto-restart: Trigger when this workflow completes (24/7 continuous)
-  workflow_run:
-    workflows: ["Unified Google Ads Agent"]
-    types:
-      - completed
-    branches:
-      - main
-      - master
+  # Note: Workflow auto-restarts itself after 5 minutes (see last step for 24/7 continuous operation)
 
 jobs:
   scrape:
@@ -83,8 +76,8 @@ jobs:
             npm-debug.log*
           retention-days: 7
       
-      - name: Wait 5 minutes then restart workflow
-        if: always() && github.event_name != 'workflow_run'
+      - name: Wait 5 minutes then restart workflow (24/7 continuous)
+        if: always()
         run: |
           echo "⏳ Waiting 5 minutes before restarting workflow..."
           sleep 300
