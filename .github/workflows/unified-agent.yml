@@ -3,6 +3,12 @@ name: Unified Google Ads Agent
 on:
   # Manual trigger
   workflow_dispatch:
+    inputs:
+      sheet_name:
+        description: 'Sheet/Tab name to process'
+        required: false
+        default: 'Test data'
+        type: string
   
   # Trigger from Google Sheets (via repository_dispatch)
   repository_dispatch:
@@ -73,6 +79,7 @@ jobs:
       
       - name: Run Unified Agent
         env:
+          SHEET_NAME: ${{ inputs.sheet_name || secrets.SHEET_NAME || 'Test data' }}
           CONCURRENT_PAGES: ${{ secrets.CONCURRENT_PAGES || '8' }}
           BATCH_DELAY_MIN: ${{ secrets.BATCH_DELAY_MIN || '3000' }}
           BATCH_DELAY_MAX: ${{ secrets.BATCH_DELAY_MAX || '6000' }}

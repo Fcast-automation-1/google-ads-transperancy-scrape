@@ -23,7 +23,7 @@ const fs = require('fs');
 // CONFIGURATION
 // ============================================
 const SPREADSHEET_ID = '1l4JpCcA1GSkta1CE77WxD_YCgePHI87K7NtMu1Sd4Q0';
-const SHEET_NAME = 'Test data';
+const SHEET_NAME = process.env.SHEET_NAME || 'Test data'; // Can be overridden via env var
 const CREDENTIALS_PATH = './credentials.json';
 const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 8; // Increased for speed
 const MAX_WAIT_TIME = 60000;
