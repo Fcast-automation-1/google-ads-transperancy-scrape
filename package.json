@@ -5,6 +5,8 @@
   "main": "index.js",
   "scripts": {
     "start": "node agent.js",
+    "unified": "node \"unified_agent copy.js\"",
+    "unified-agent": "node \"unified_agent copy.js\"",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
