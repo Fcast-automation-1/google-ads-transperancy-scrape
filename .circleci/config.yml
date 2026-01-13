@@ -164,13 +164,8 @@ workflows:
   # Workflow to run both bottom-to-top agents
   # - unified_agent_bottom.js uses 'Sheet1' (hardcoded)
   # - unified_agent_copy_bottom.js uses 'Test data' (or SHEET_NAME env var)
+  # This workflow runs on pushes to main branch AND can be triggered manually
   run-bottom-to-top-agents:
     jobs:
-      - run-unified-agent-bottom:
-          filters:
-            branches:
-              only: main
-      - run-unified-agent-copy-bottom:
-          filters:
-            branches:
-              only: main
+      - run-unified-agent-bottom
+      - run-unified-agent-copy-bottom
