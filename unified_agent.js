@@ -27,15 +27,20 @@ const SHEET_NAME = process.env.SHEET_NAME || 'Sheet1'; // Default back to Sheet1
 const CREDENTIALS_PATH = './credentials.json';
 const SHEET_BATCH_SIZE = parseInt(process.env.SHEET_BATCH_SIZE) || 10000; // Increased for extremely large sheets (2lc rows)
 const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 2; // Decreased per user request for safety
-const MAX_WAIT_TIME = 60000;
-const MAX_RETRIES = 4;
-const POST_CLICK_WAIT = 6000;
+const MAX_WAIT_TIME = 90000; // Increased timeout for thorough loading
+const MAX_RETRIES = 5; // More retries for reliability
+const POST_CLICK_WAIT = 8000; // More time for video to load
 const RETRY_WAIT_MULTIPLIER = 1.25;
-const PAGE_LOAD_DELAY_MIN = parseInt(process.env.PAGE_LOAD_DELAY_MIN) || 1000; // Faster staggered starts
-const PAGE_LOAD_DELAY_MAX = parseInt(process.env.PAGE_LOAD_DELAY_MAX) || 3000;
+const PAGE_LOAD_DELAY_MIN = parseInt(process.env.PAGE_LOAD_DELAY_MIN) || 1500;
+const PAGE_LOAD_DELAY_MAX = parseInt(process.env.PAGE_LOAD_DELAY_MAX) || 4000;
 
-const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 3000; // Faster delays
-const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 7000; // Faster delays
+const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 4000;
+const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 8000;
+
+// Thorough extraction settings
+const IFRAME_WAIT_TIMEOUT = 8000; // Wait up to 8s for each iframe
+const EXTRACTION_ATTEMPTS = 3; // Try extraction multiple times within same page
+const EXTRACTION_RETRY_DELAY = 3000; // Wait between extraction attempts
 
 const PROXIES = process.env.PROXIES ? process.env.PROXIES.split(';').map(p => p.trim()).filter(Boolean) : [];
 const MAX_PROXY_ATTEMPTS = parseInt(process.env.MAX_PROXY_ATTEMPTS) || Math.max(3, PROXIES.length);
@@ -230,6 +235,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         videoId: 'SKIP'
     };
     let capturedVideoId = null;
+    let capturedStoreLink = null; // Capture store links from network requests
 
     // Clean name function - removes CSS garbage and normalizes
     const cleanName = (name) => {
@@ -343,7 +349,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         };
     }, screenWidth, screenHeight);
 
-    // VIDEO ID CAPTURE + SPEED OPTIMIZATION
+    // VIDEO ID + STORE LINK CAPTURE FROM NETWORK REQUESTS
     await page.setRequestInterception(true);
     page.on('request', (request) => {
         const requestUrl = request.url();
@@ -372,12 +378,67 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             }
         }
 
+        // NETWORK-LEVEL STORE LINK CAPTURE - catch redirects!
+        if (!capturedStoreLink) {
+            // Direct Play Store links
+            if (requestUrl.includes('play.google.com/store/apps') && requestUrl.includes('id=')) {
+                capturedStoreLink = requestUrl.split('&')[0].includes('id=') ? requestUrl : null;
+                if (capturedStoreLink) {
+                    // Clean up the URL to get just the store link
+                    const match = requestUrl.match(/(https?:\/\/play\.google\.com\/store\/apps\/details\?id=[a-zA-Z0-9._]+)/);
+                    if (match) capturedStoreLink = match[1];
+                }
+            }
+            // App Store links
+            else if ((requestUrl.includes('apps.apple.com') || requestUrl.includes('itunes.apple.com')) && requestUrl.includes('/app/')) {
+                const match = requestUrl.match(/(https?:\/\/(apps|itunes)\.apple\.com\/[^\s&"'?#]+)/);
+                if (match) capturedStoreLink = match[1];
+            }
+            // Google Ads redirect links - parse for store URLs
+            else if (requestUrl.includes('googleadservices.com') || requestUrl.includes('/pagead/') || requestUrl.includes('doubleclick.net')) {
+                try {
+                    const patterns = [
+                        /[?&]adurl=([^&\s]+)/i,
+                        /[?&]dest=([^&\s]+)/i,
+                        /[?&]url=([^&\s]+)/i,
+                        /[?&]q=([^&\s]+)/i,
+                        /[?&]r=([^&\s]+)/i,
+                        /[?&]goto=([^&\s]+)/i,
+                        /[?&]redirect=([^&\s]+)/i,
+                        /[?&]target=([^&\s]+)/i
+                    ];
+                    for (const pattern of patterns) {
+                        const match = requestUrl.match(pattern);
+                        if (match && match[1]) {
+                            let decoded = decodeURIComponent(match[1]);
+                            // Double decode in case of double encoding
+                            try { decoded = decodeURIComponent(decoded); } catch (e) { }
+
+                            if (decoded.includes('play.google.com/store/apps') && decoded.includes('id=')) {
+                                const storeMatch = decoded.match(/(https?:\/\/play\.google\.com\/store\/apps\/details\?id=[a-zA-Z0-9._]+)/);
+                                if (storeMatch) {
+                                    capturedStoreLink = storeMatch[1];
+                                    break;
+                                }
+                            }
+                            if ((decoded.includes('apps.apple.com') || decoded.includes('itunes.apple.com')) && decoded.includes('/app/')) {
+                                const storeMatch = decoded.match(/(https?:\/\/(apps|itunes)\.apple\.com\/[^\s&"'?#]+)/);
+                                if (storeMatch) {
+                                    capturedStoreLink = storeMatch[1];
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } catch (e) { /* Ignore parsing errors */ }
+            }
+        }
+
         const resourceType = request.resourceType();
-        // Abort more resource types for speed: image, font, stylesheet (optional but fast), and tracking
-        const blockedTypes = ['image', 'font', 'other', 'stylesheet'];
+        // Only block non-essential resources - allow more through for thorough extraction
+        const blockedTypes = ['font', 'other'];
         const blockedPatterns = [
-            'analytics', 'google-analytics', 'doubleclick', 'pagead',
-            'facebook.com', 'bing.com', 'logs', 'collect', 'securepubads'
+            'analytics', 'google-analytics', 'facebook.com', 'bing.com', 'logs', 'collect'
         ];
 
         if (blockedTypes.includes(resourceType) || blockedPatterns.some(p => requestUrl.includes(p))) {
@@ -437,23 +498,26 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             return { advertiserName: 'BLOCKED', appName: 'BLOCKED', storeLink: 'BLOCKED', videoId: 'BLOCKED' };
         }
 
-        // Wait for dynamic elements to settle (increased for large datasets)
-        const baseWait = 4000 + Math.random() * 2000; // Increased: 4000-6000ms for better iframe loading
+        // THOROUGH WAIT: Give page plenty of time to load dynamic content
+        const baseWait = 8000 + Math.random() * 4000; // 8-12 seconds for thorough loading
         const attemptMultiplier = Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
+        console.log(`  ⏳ Waiting ${Math.round(baseWait / 1000)}s for page to fully load...`);
         await sleep(baseWait * attemptMultiplier);
 
-        // Additional wait specifically for iframes to render (critical for Play Store links in large datasets)
+        // Wait for iframes to fully render - critical for Play Store links
         try {
-            await page.evaluate(async () => {
+            await page.evaluate(async (iframeTimeout) => {
                 const iframes = document.querySelectorAll('iframe');
                 if (iframes.length > 0) {
+                    console.log(`Found ${iframes.length} iframes, waiting for them to load...`);
                     await new Promise(resolve => {
                         let loaded = 0;
                         const totalIframes = iframes.length;
                         const checkLoaded = () => {
                             loaded++;
                             if (loaded >= totalIframes) {
-                                setTimeout(resolve, 1500); // Extra time after all iframes load
+                                // Extra wait after all iframes report loaded
+                                setTimeout(resolve, 3000);
                             }
                         };
                         iframes.forEach(iframe => {
@@ -462,22 +526,34 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                     checkLoaded();
                                 } else {
                                     iframe.onload = checkLoaded;
-                                    // Timeout after 4 seconds per iframe
-                                    setTimeout(checkLoaded, 4000);
+                                    // Longer timeout per iframe
+                                    setTimeout(checkLoaded, iframeTimeout);
                                 }
                             } catch (e) {
-                                // Cross-origin iframe, count as loaded
-                                checkLoaded();
+                                // Cross-origin iframe - give it more time
+                                setTimeout(checkLoaded, 2000);
                             }
                         });
-                        // If no iframes, resolve immediately
                         if (totalIframes === 0) resolve();
                     });
                 }
-            });
+            }, IFRAME_WAIT_TIMEOUT);
         } catch (e) {
-            // If iframe check fails, wait a bit anyway
-            await sleep(1000);
+            // If iframe check fails, wait longer anyway
+            await sleep(3000);
+        }
+
+        // Try to wait for specific store link selectors (best effort)
+        try {
+            await Promise.race([
+                page.waitForSelector('a[href*="play.google.com/store/apps"]', { timeout: 5000 }),
+                page.waitForSelector('a[data-asoch-targets*="ochAppName"]', { timeout: 5000 }),
+                page.waitForSelector('a[data-asoch-targets*="ochButton"]', { timeout: 5000 }),
+                sleep(5000) // Fallback timeout
+            ]);
+            console.log(`  ✓ Found store link selector`);
+        } catch (e) {
+            // Selector not found within timeout - continue anyway
         }
 
         // Random mouse movements for more human-like behavior
@@ -825,6 +901,104 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                 }
             }
 
+            // NETWORK-CAPTURED STORE LINK FALLBACK
+            // If we still don't have a store link, use one captured from network requests
+            if (result.storeLink === 'NOT_FOUND' && capturedStoreLink) {
+                result.storeLink = capturedStoreLink;
+                console.log(`  ✓ Found Store Link from network: ${capturedStoreLink.substring(0, 50)}...`);
+            }
+
+            // =====================================================
+            // MULTIPLE EXTRACTION ATTEMPTS - Thorough retry within same page
+            // If store link still not found, wait and try again (up to EXTRACTION_ATTEMPTS times)
+            // =====================================================
+            if (result.storeLink === 'NOT_FOUND') {
+                for (let extractAttempt = 2; extractAttempt <= EXTRACTION_ATTEMPTS; extractAttempt++) {
+                    console.log(`  🔄 Store link not found, waiting and retrying (attempt ${extractAttempt}/${EXTRACTION_ATTEMPTS})...`);
+                    await sleep(EXTRACTION_RETRY_DELAY);
+
+                    // Scroll to trigger lazy loading
+                    await page.evaluate(async () => {
+                        window.scrollBy(0, 200);
+                        await new Promise(r => setTimeout(r, 500));
+                        window.scrollBy(0, -100);
+                    });
+
+                    // Check network-captured link first
+                    if (capturedStoreLink) {
+                        result.storeLink = capturedStoreLink;
+                        console.log(`  ✓ Found Store Link from network (attempt ${extractAttempt}): ${capturedStoreLink.substring(0, 50)}...`);
+                        break;
+                    }
+
+                    // Re-scan all frames
+                    const retryFrames = page.frames();
+                    for (const frame of retryFrames) {
+                        try {
+                            const retryLink = await frame.evaluate(() => {
+                                const allLinks = document.querySelectorAll('a');
+                                for (const a of allLinks) {
+                                    const href = a.href;
+                                    if (href && href.includes('play.google.com/store/apps') && href.includes('id=')) {
+                                        return href;
+                                    }
+                                }
+                                // Check googleadservices redirects
+                                for (const a of allLinks) {
+                                    const href = a.href || '';
+                                    if (href.includes('googleadservices.com') || href.includes('/pagead/')) {
+                                        const patterns = [/[?&]adurl=([^&\s]+)/i, /[?&]dest=([^&\s]+)/i, /[?&]url=([^&\s]+)/i];
+                                        for (const pattern of patterns) {
+                                            const match = href.match(pattern);
+                                            if (match && match[1]) {
+                                                try {
+                                                    let decoded = decodeURIComponent(match[1]);
+                                                    try { decoded = decodeURIComponent(decoded); } catch (e) { }
+                                                    if (decoded.includes('play.google.com/store/apps') && decoded.includes('id=')) {
+                                                        const storeMatch = decoded.match(/(https?:\/\/play\.google\.com\/store\/apps\/details\?id=[a-zA-Z0-9._]+)/);
+                                                        if (storeMatch) return storeMatch[1];
+                                                    }
+                                                } catch (e) { }
+                                            }
+                                        }
+                                    }
+                                }
+                                return null;
+                            });
+
+                            if (retryLink) {
+                                result.storeLink = retryLink;
+                                console.log(`  ✓ Found Store Link (attempt ${extractAttempt}): ${retryLink.substring(0, 50)}...`);
+                                break;
+                            }
+                        } catch (e) { /* Ignore frame errors */ }
+                    }
+
+                    if (result.storeLink !== 'NOT_FOUND') break;
+
+                    // Also check main page again
+                    const mainPageRetry = await page.evaluate(() => {
+                        const allLinks = document.querySelectorAll('a');
+                        for (const a of allLinks) {
+                            const href = a.href;
+                            if (href && href.includes('play.google.com/store/apps') && href.includes('id=')) {
+                                return href;
+                            }
+                        }
+                        return null;
+                    });
+                    if (mainPageRetry) {
+                        result.storeLink = mainPageRetry;
+                        console.log(`  ✓ Found Store Link on main page (attempt ${extractAttempt}): ${mainPageRetry.substring(0, 50)}...`);
+                        break;
+                    }
+                }
+
+                if (result.storeLink === 'NOT_FOUND') {
+                    console.log(`  ⚠️ Store link not found after ${EXTRACTION_ATTEMPTS} attempts`);
+                }
+            }
+
             // Final fallback from Meta/Title
             if (result.appName === 'NOT_FOUND' || result.appName === 'Ad Details') {
                 try {
@@ -911,51 +1085,62 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                 try {
                     const client = await page.target().createCDPSession();
 
-                    // More human-like mouse movement: gradual approach to button
-                    const startX = Math.random() * viewport.width;
-                    const startY = Math.random() * viewport.height;
-                    const steps = 3 + Math.floor(Math.random() * 3); // 3-5 steps
+                    // Try multiple click attempts if needed
+                    const maxClickAttempts = 3;
+                    for (let clickAttempt = 1; clickAttempt <= maxClickAttempts && !capturedVideoId; clickAttempt++) {
+                        if (clickAttempt > 1) {
+                            console.log(`  🔄 Video not captured, retrying click (attempt ${clickAttempt}/${maxClickAttempts})...`);
+                            await sleep(2000); // Wait before retry
+                        }
 
-                    for (let i = 0; i <= steps; i++) {
-                        const progress = i / steps;
-                        const currentX = startX + (playButtonInfo.x - startX) * progress;
-                        const currentY = startY + (playButtonInfo.y - startY) * progress;
+                        // More human-like mouse movement: gradual approach to button
+                        const startX = Math.random() * viewport.width;
+                        const startY = Math.random() * viewport.height;
+                        const steps = 3 + Math.floor(Math.random() * 3); // 3-5 steps
+
+                        for (let i = 0; i <= steps; i++) {
+                            const progress = i / steps;
+                            const currentX = startX + (playButtonInfo.x - startX) * progress;
+                            const currentY = startY + (playButtonInfo.y - startY) * progress;
+                            await client.send('Input.dispatchMouseEvent', {
+                                type: 'mouseMoved',
+                                x: currentX,
+                                y: currentY
+                            });
+                            await sleep(50 + Math.random() * 50); // Variable speed
+                        }
+
+                        // Hover briefly before clicking (more human-like)
+                        await sleep(150 + Math.random() * 100);
+
+                        // Click with slight randomness in position
+                        const clickX = playButtonInfo.x + (Math.random() - 0.5) * 5;
+                        const clickY = playButtonInfo.y + (Math.random() - 0.5) * 5;
+
                         await client.send('Input.dispatchMouseEvent', {
-                            type: 'mouseMoved',
-                            x: currentX,
-                            y: currentY
+                            type: 'mousePressed',
+                            x: clickX,
+                            y: clickY,
+                            button: 'left',
+                            clickCount: 1
                         });
-                        await sleep(50 + Math.random() * 50); // Variable speed
-                    }
+                        await sleep(80 + Math.random() * 40);
+                        await client.send('Input.dispatchMouseEvent', {
+                            type: 'mouseReleased',
+                            x: clickX,
+                            y: clickY,
+                            button: 'left',
+                            clickCount: 1
+                        });
 
-                    // Hover briefly before clicking (more human-like)
-                    await sleep(150 + Math.random() * 100);
+                        // Wait for video to load (poll for capturedVideoId) with increasing wait per attempt
+                        const waitTime = POST_CLICK_WAIT * Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1) * clickAttempt;
+                        const startTime = Date.now();
+                        while (Date.now() - startTime < waitTime && !capturedVideoId) {
+                            await sleep(200); // Faster polling
+                        }
 
-                    // Click with slight randomness in position
-                    const clickX = playButtonInfo.x + (Math.random() - 0.5) * 5;
-                    const clickY = playButtonInfo.y + (Math.random() - 0.5) * 5;
-
-                    await client.send('Input.dispatchMouseEvent', {
-                        type: 'mousePressed',
-                        x: clickX,
-                        y: clickY,
-                        button: 'left',
-                        clickCount: 1
-                    });
-                    await sleep(80 + Math.random() * 40);
-                    await client.send('Input.dispatchMouseEvent', {
-                        type: 'mouseReleased',
-                        x: clickX,
-                        y: clickY,
-                        button: 'left',
-                        clickCount: 1
-                    });
-
-                    // Wait for video to load (poll for capturedVideoId)
-                    const waitTime = POST_CLICK_WAIT * Math.pow(RETRY_WAIT_MULTIPLIER, attempt - 1);
-                    const startTime = Date.now();
-                    while (Date.now() - startTime < waitTime && !capturedVideoId) {
-                        await sleep(300); // Faster polling
+                        if (capturedVideoId) break;
                     }
 
                     if (capturedVideoId) {
@@ -963,7 +1148,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         console.log(`  ✓ Video ID: ${capturedVideoId}`);
                     } else {
                         result.videoId = 'NOT_FOUND';
-                        console.log(`  ⚠️ No video ID captured`);
+                        console.log(`  ⚠️ No video ID captured after ${maxClickAttempts} click attempts`);
                     }
                 } catch (e) {
                     console.log(`  ⚠️ Click failed: ${e.message}`);
