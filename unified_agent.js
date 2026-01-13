@@ -168,29 +168,33 @@ async function batchWriteToSheet(sheets, updates) {
     if (updates.length === 0) return;
 
     const data = [];
+    // Quote sheet name to handle potential spaces
+    const quotedSheet = `'${SHEET_NAME}'`;
+
     updates.forEach(({ rowIndex, advertiserName, storeLink, appName, videoId }) => {
         const rowNum = rowIndex + 1;
         if (advertiserName && advertiserName !== 'SKIP') {
-            data.push({ range: `${SHEET_NAME}!A${rowNum}`, values: [[advertiserName]] });
+            data.push({ range: `${quotedSheet}!A${rowNum}`, values: [[advertiserName]] });
         }
         if (storeLink && storeLink !== 'SKIP') {
-            data.push({ range: `${SHEET_NAME}!C${rowNum}`, values: [[storeLink]] });
+            data.push({ range: `${quotedSheet}!C${rowNum}`, values: [[storeLink]] });
         }
         if (appName && appName !== 'SKIP') {
-            data.push({ range: `${SHEET_NAME}!D${rowNum}`, values: [[appName]] });
+            data.push({ range: `${quotedSheet}!D${rowNum}`, values: [[appName]] });
         }
         if (videoId && videoId !== 'SKIP') {
-            data.push({ range: `${SHEET_NAME}!E${rowNum}`, values: [[videoId]] });
+            data.push({ range: `${quotedSheet}!E${rowNum}`, values: [[videoId]] });
         }
 
         // Write Timestamp to Column M (Pakistan Time)
         const timestamp = new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' });
-        data.push({ range: `${SHEET_NAME}!M${rowNum}`, values: [[timestamp]] });
+        data.push({ range: `${quotedSheet}!M${rowNum}`, values: [[timestamp]] });
     });
 
     if (data.length === 0) return;
 
     try {
+        console.log(`  📝 Writing to sheet (Spreadsheet ID: ...${SPREADSHEET_ID.slice(-5)})`);
         await sheets.spreadsheets.values.batchUpdate({
             spreadsheetId: SPREADSHEET_ID,
             resource: { valueInputOption: 'RAW', data: data }
@@ -214,6 +218,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         videoId: 'SKIP'
     };
     let capturedVideoId = null;
+    let capturedStoreLink = null;
 
     // Clean name function - removes CSS garbage and normalizes
     const cleanName = (name) => {
@@ -327,7 +332,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         };
     }, screenWidth, screenHeight);
 
-    // VIDEO ID CAPTURE + SPEED OPTIMIZATION
+    // VIDEO ID CAPTURE + SPEED OPTIMIZATION + STORE LINK CAPTURE
     await page.setRequestInterception(true);
     page.on('request', (request) => {
         const requestUrl = request.url();
@@ -353,6 +358,40 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             const v = urlParams.get('video_id') || urlParams.get('v');
             if (v && v.length >= 11) {
                 capturedVideoId = v;
+            }
+        }
+
+        // NETWORK-LEVEL STORE LINK CAPTURE - catch redirects!
+        if (!capturedStoreLink) {
+            // Direct Play Store links
+            if (requestUrl.includes('play.google.com/store/apps') && requestUrl.includes('id=')) {
+                capturedStoreLink = requestUrl.split('&')[0].includes('id=') ? requestUrl : null;
+                if (capturedStoreLink) {
+                    const match = requestUrl.match(/(https?:\/\/play\.google\.com\/store\/apps\/details\?id=[a-zA-Z0-9._]+)/);
+                    if (match) capturedStoreLink = match[1];
+                }
+            }
+            // App Store links
+            else if ((requestUrl.includes('apps.apple.com') || requestUrl.includes('itunes.apple.com')) && requestUrl.includes('/app/')) {
+                const match = requestUrl.match(/(https?:\/\/(apps|itunes)\.apple\.com\/[^\s&"'?#]+)/);
+                if (match) capturedStoreLink = match[1];
+            }
+            // Google Ads redirect links
+            else if (requestUrl.includes('googleadservices.com') || requestUrl.includes('/pagead/') || requestUrl.includes('doubleclick.net')) {
+                try {
+                    const patterns = [/[?&]adurl=([^&\s]+)/i, /[?&]dest=([^&\s]+)/i, /[?&]url=([^&\s]+)/i, /[?&]q=([^&\s]+)/i];
+                    for (const pattern of patterns) {
+                        const match = requestUrl.match(pattern);
+                        if (match && match[1]) {
+                            let decoded = decodeURIComponent(match[1]);
+                            try { decoded = decodeURIComponent(decoded); } catch (e) { }
+                            if (decoded.includes('play.google.com/store/apps') && decoded.includes('id=')) {
+                                const storeMatch = decoded.match(/(https?:\/\/play\.google\.com\/store\/apps\/details\?id=[a-zA-Z0-9._]+)/);
+                                if (storeMatch) { capturedStoreLink = storeMatch[1]; break; }
+                            }
+                        }
+                    }
+                } catch (e) { }
             }
         }
 
