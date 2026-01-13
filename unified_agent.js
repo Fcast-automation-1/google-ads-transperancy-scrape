@@ -26,7 +26,7 @@ const SPREADSHEET_ID = '1l4JpCcA1GSkta1CE77WxD_YCgePHI87K7NtMu1Sd4Q0';
 const SHEET_NAME = process.env.SHEET_NAME || 'Sheet1'; // Default back to Sheet1 but flexible
 const CREDENTIALS_PATH = './credentials.json';
 const SHEET_BATCH_SIZE = parseInt(process.env.SHEET_BATCH_SIZE) || 10000; // Increased for extremely large sheets (2lc rows)
-const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 5; // Balanced: faster but safe
+const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 2; // Decreased per user request for safety
 const MAX_WAIT_TIME = 60000;
 const MAX_RETRIES = 4;
 const POST_CLICK_WAIT = 6000;
@@ -34,8 +34,8 @@ const RETRY_WAIT_MULTIPLIER = 1.25;
 const PAGE_LOAD_DELAY_MIN = parseInt(process.env.PAGE_LOAD_DELAY_MIN) || 1000; // Faster staggered starts
 const PAGE_LOAD_DELAY_MAX = parseInt(process.env.PAGE_LOAD_DELAY_MAX) || 3000;
 
-const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 5000; // Balanced: faster but safe
-const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 10000; // Balanced: faster but safe
+const BATCH_DELAY_MIN = parseInt(process.env.BATCH_DELAY_MIN) || 3000; // Faster delays
+const BATCH_DELAY_MAX = parseInt(process.env.BATCH_DELAY_MAX) || 7000; // Faster delays
 
 const PROXIES = process.env.PROXIES ? process.env.PROXIES.split(';').map(p => p.trim()).filter(Boolean) : [];
 const MAX_PROXY_ATTEMPTS = parseInt(process.env.MAX_PROXY_ATTEMPTS) || Math.max(3, PROXIES.length);
