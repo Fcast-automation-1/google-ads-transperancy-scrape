@@ -25,7 +25,7 @@ const fs = require('fs');
 const SPREADSHEET_ID = '1l4JpCcA1GSkta1CE77WxD_YCgePHI87K7NtMu1Sd4Q0';
 const SHEET_NAME = process.env.SHEET_NAME || 'Sheet1'; // Default back to Sheet1 but flexible
 const CREDENTIALS_PATH = './credentials.json';
-const SHEET_BATCH_SIZE = parseInt(process.env.SHEET_BATCH_SIZE) || 1000; // Rows to load per batch
+const SHEET_BATCH_SIZE = parseInt(process.env.SHEET_BATCH_SIZE) || 10000; // Increased for extremely large sheets (2lc rows)
 const CONCURRENT_PAGES = parseInt(process.env.CONCURRENT_PAGES) || 5; // Balanced: faster but safe
 const MAX_WAIT_TIME = 60000;
 const MAX_RETRIES = 4;
@@ -94,8 +94,10 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
     let startRow = 1; // Start from row 2 (skip header)
     let hasMoreData = true;
     let totalProcessed = 0;
+    let retryCount = 0;
+    const MAX_SHEET_RETRIES = 5;
 
-    console.log(`📊 Loading data in batches of ${batchSize} rows...`);
+    console.log(`📊 Scanning ${SHEET_NAME} in large batches of ${batchSize} rows...`);
 
     while (hasMoreData) {
         try {
@@ -142,25 +144,39 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
             }
 
             totalProcessed += rows.length;
-            console.log(`  ✓ Processed ${totalProcessed} rows, found ${toProcess.length} to process`);
+            console.log(`  ✓ Scanned ${totalProcessed} rows... found ${toProcess.length} pending items`);
+
+            retryCount = 0; // Reset retry count on success
 
             // If we got less than batchSize rows, we've reached the end
             if (rows.length < batchSize) {
                 hasMoreData = false;
             } else {
                 startRow = endRow + 1;
-                // Small delay between batches to avoid rate limits
-                await sleep(100);
+                // moderate delay to stay under quota (max 60 requests per minute)
+                await sleep(1200);
             }
         } catch (error) {
+            const isQuotaError = error.code === 429 ||
+                error.message?.includes('Quota exceeded') ||
+                error.message?.includes('Too Many Requests');
+
+            if (isQuotaError && retryCount < MAX_SHEET_RETRIES) {
+                retryCount++;
+                const backoff = Math.pow(2, retryCount) * 5000 + Math.random() * 2000;
+                console.warn(`  ⚠️ Rate limit hit at row ${startRow}. Pausing for ${Math.round(backoff / 1000)}s before retry...`);
+                await sleep(backoff);
+                continue; // Retry same batch
+            }
+
             console.error(`  ⚠️ Error loading batch starting at row ${startRow}: ${error.message}`);
-            // If error, try to continue with next batch
-            startRow += batchSize;
-            await sleep(500); // Wait a bit longer on error
+            startRow += batchSize; // Skip problematic batch
+            retryCount = 0;
+            await sleep(2000);
         }
     }
 
-    console.log(`📊 Total: ${totalProcessed} rows scanned, ${toProcess.length} need processing\n`);
+    console.log(`📊 Scan Complete: ${totalProcessed} rows parsed, ${toProcess.length} need processing.\n`);
     return toProcess;
 }
 
