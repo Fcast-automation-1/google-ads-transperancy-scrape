@@ -113,11 +113,11 @@ jobs:
             npm-debug.log*
           retention-days: 7
       
-      - name: Wait 5 minutes then restart workflow (24/7 continuous)
+      - name: Wait 2 minutes then restart workflow (24/7 continuous)
         if: always() && (github.event_name != 'schedule' || steps.check_running.outputs.skip != 'true')
         run: |
-          echo "⏳ Waiting 5 minutes before restarting workflow..."
-          sleep 300
+          echo "⏳ Waiting 2 minutes before restarting workflow..."
+          sleep 120
           echo "🔄 Triggering workflow restart..."
           
           # Get workflow ID

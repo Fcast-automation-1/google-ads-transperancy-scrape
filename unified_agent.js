@@ -723,11 +723,12 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         }
 
                         // Backup: Install button for link
-                        if (data.appName && !data.storeLink) {
+                        if (!data.storeLink) {
                             const installSels = [
                                 'a[data-asoch-targets*="ochButton"]',
                                 'a[data-asoch-targets*="Install" i]',
-                                'a[aria-label*="Install" i]'
+                                'a[aria-label*="Install" i]',
+                                'a[class*="button" i]'
                             ];
                             for (const sel of installSels) {
                                 const el = root.querySelector(sel);
@@ -738,6 +739,19 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                                         data.isVideo = true;
                                         break;
                                     }
+                                }
+                            }
+                        }
+
+                        // ULTIMATE FALLBACK: Search ALL links in this frame for a store link
+                        if (!data.storeLink) {
+                            const allLinks = root.querySelectorAll('a');
+                            for (const a of allLinks) {
+                                const storeLink = extractStoreLink(a.href);
+                                if (storeLink) {
+                                    data.storeLink = storeLink;
+                                    data.isVideo = true;
+                                    break;
                                 }
                             }
                         }
@@ -777,9 +791,38 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     // If we only found name (no link), store it but keep looking
                     if (frameData.appName && !frameData.storeLink && result.appName === 'NOT_FOUND') {
                         result.appName = cleanName(frameData.appName);
-                        // DON'T break - continue looking for a frame with BOTH name+link
+                    }
+                    // IMPORTANT: Also capture store link from this frame even if we didn't get app name
+                    if (frameData.storeLink && result.storeLink === 'NOT_FOUND') {
+                        result.storeLink = frameData.storeLink;
+                        console.log(`  ✓ Found Store Link in frame: ${frameData.storeLink.substring(0, 50)}...`);
                     }
                 } catch (e) { }
+            }
+
+            // MAIN PAGE FALLBACK: Search all links on main page for Play Store URL
+            if (result.storeLink === 'NOT_FOUND') {
+                const pageStoreLink = await page.evaluate(() => {
+                    const allLinks = document.querySelectorAll('a');
+                    for (const a of allLinks) {
+                        const href = a.href;
+                        if (href && href.includes('play.google.com/store/apps') && href.includes('id=')) {
+                            return href;
+                        }
+                    }
+                    // Also check for Apple Store as fallback
+                    for (const a of allLinks) {
+                        const href = a.href;
+                        if (href && (href.includes('apps.apple.com') || href.includes('itunes.apple.com')) && href.includes('/app/')) {
+                            return href;
+                        }
+                    }
+                    return null;
+                });
+                if (pageStoreLink) {
+                    result.storeLink = pageStoreLink;
+                    console.log(`  ✓ Found Store Link on main page: ${pageStoreLink.substring(0, 50)}...`);
+                }
             }
 
             // Final fallback from Meta/Title
