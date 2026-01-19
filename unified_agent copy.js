@@ -9,6 +9,8 @@
  *   Column C: App Link
  *   Column D: App Name
  *   Column E: Video ID
+ *   Column F: App Subtitle/Tagline
+ *   Column G: Image URL
  *   Column M: Timestamp
  */
 
@@ -100,7 +102,7 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
     while (hasMoreData) {
         try {
             const endRow = startRow + batchSize - 1;
-            const range = `${SHEET_NAME}!A${startRow + 1}:E${endRow + 1}`; // +1 because Google Sheets is 1-indexed
+            const range = `${SHEET_NAME}!A${startRow + 1}:G${endRow + 1}`; // +1 because Google Sheets is 1-indexed
 
             const response = await sheets.spreadsheets.values.get({
                 spreadsheetId: SPREADSHEET_ID,
@@ -121,24 +123,26 @@ async function getUrlData(sheets, batchSize = SHEET_BATCH_SIZE) {
                 const storeLink = row[2]?.trim() || '';
                 const appName = row[3]?.trim() || '';
                 const videoId = row[4]?.trim() || '';
+                const appSubtitle = row[5]?.trim() || '';
+                const imageUrl = row[6]?.trim() || '';
 
                 if (!url) continue;
 
-                const needsMetadata = !storeLink || !appName;
-                const hasValidStoreLink = storeLink &&
-                    storeLink !== 'NOT_FOUND' &&
-                    (storeLink.includes('play.google.com') || storeLink.includes('apps.apple.com'));
-                const needsVideoId = hasValidStoreLink && !videoId;
-
-                if (needsMetadata || needsVideoId) {
-                    toProcess.push({
-                        url,
-                        rowIndex: actualRowIndex,
-                        needsMetadata,
-                        needsVideoId,
-                        existingStoreLink: storeLink
-                    });
+                // SKIP ONLY: Rows with Play Store link in Column C
+                const hasPlayStoreLink = storeLink && storeLink.includes('play.google.com');
+                if (hasPlayStoreLink) {
+                    continue; // Skip - already has Play Store link
                 }
+
+                // Process all other rows
+                const needsMetadata = !storeLink || !appName || !appSubtitle || !imageUrl;
+                toProcess.push({
+                    url,
+                    rowIndex: actualRowIndex,
+                    needsMetadata,
+                    needsVideoId: true,
+                    existingStoreLink: storeLink
+                });
             }
 
             totalProcessed += rows.length;
@@ -168,7 +172,7 @@ async function batchWriteToSheet(sheets, updates) {
     if (updates.length === 0) return;
 
     const data = [];
-    updates.forEach(({ rowIndex, advertiserName, storeLink, appName, videoId }) => {
+    updates.forEach(({ rowIndex, advertiserName, storeLink, appName, videoId, appSubtitle, imageUrl }) => {
         const rowNum = rowIndex + 1;
         if (advertiserName && advertiserName !== 'SKIP') {
             data.push({ range: `${SHEET_NAME}!A${rowNum}`, values: [[advertiserName]] });
@@ -182,6 +186,13 @@ async function batchWriteToSheet(sheets, updates) {
         if (videoId && videoId !== 'SKIP') {
             data.push({ range: `${SHEET_NAME}!E${rowNum}`, values: [[videoId]] });
         }
+        // Write app subtitle/tagline to Column F
+        const appSubtitleValue = appSubtitle || 'NOT_FOUND';
+        data.push({ range: `${SHEET_NAME}!F${rowNum}`, values: [[appSubtitleValue]] });
+
+        // Write Image URL to Column G
+        const imageUrlValue = imageUrl || 'NOT_FOUND';
+        data.push({ range: `${SHEET_NAME}!G${rowNum}`, values: [[imageUrlValue]] });
 
         // Write Timestamp to Column M (Pakistan Time)
         const timestamp = new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' });
@@ -211,7 +222,9 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         advertiserName: 'SKIP',
         appName: needsMetadata ? 'NOT_FOUND' : 'SKIP',
         storeLink: needsMetadata ? 'NOT_FOUND' : 'SKIP',
-        videoId: 'SKIP'
+        videoId: 'SKIP',
+        appSubtitle: needsMetadata ? 'NOT_FOUND' : 'SKIP',
+        imageUrl: needsMetadata ? 'NOT_FOUND' : 'SKIP'
     };
     let capturedVideoId = null;
 
@@ -478,59 +491,7 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             }
         } catch (e) { /* Ignore if CDP fails */ }
 
-        // =====================================================
-        // EARLY TEXT AD DETECTION - Skip text ads entirely
-        // Only process video ads for Play Store links
-        // =====================================================
-        const isTextAd = await page.evaluate(() => {
-            // Check for video elements
-            const videoEl = document.querySelector('video');
-            if (videoEl && videoEl.offsetWidth > 10 && videoEl.offsetHeight > 10) return false;
-
-            // Check page text for video indicators
-            const bodyText = document.body.innerText.toLowerCase();
-            if (bodyText.includes('format: video') || bodyText.includes('video ad')) return false;
-
-            // Check for video-related iframes/embeds
-            const iframes = document.querySelectorAll('iframe');
-            for (const iframe of iframes) {
-                const src = iframe.src || '';
-                if (src.includes('youtube.com') || src.includes('googlevideo.com') || src.includes('video')) {
-                    return false;
-                }
-            }
-
-            // Check for play buttons
-            const playButtons = document.querySelectorAll('[aria-label*="play" i], .play-button, .ytp-play-button, .ytp-large-play-button');
-            if (playButtons.length > 0) return false;
-
-            // If none of the above, it's a text ad
-            return true;
-        });
-
-        if (isTextAd) {
-            console.log(`  📝 Text Ad detected - skipping (saving time)`);
-            await page.close();
-            return {
-                advertiserName: 'SKIP',
-                appName: 'SKIP',
-                storeLink: 'SKIP',
-                videoId: 'SKIP'
-            };
-        }
-
-        // Skip Apple Store ads early if we already have the store link
-        // Only process Play Store video ads
-        if (existingStoreLink && existingStoreLink.includes('apps.apple.com')) {
-            console.log(`  🍏 Apple Store ad detected - skipping (only processing Play Store)`);
-            await page.close();
-            return {
-                advertiserName: 'SKIP',
-                appName: 'SKIP',
-                storeLink: 'SKIP',
-                videoId: 'SKIP'
-            };
-        }
+        // All ads (video, text, image) will now be processed.
 
         // Human-like interaction (optimized for speed while staying safe)
         await page.evaluate(async () => {
@@ -605,13 +566,60 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
             for (const frame of frames) {
                 try {
                     const frameData = await frame.evaluate((blacklist) => {
-                        const data = { appName: null, storeLink: null, isVideo: false };
+                        const data = { appName: null, storeLink: null, isVideo: false, appSubtitle: null, imageUrl: null };
                         const root = document.querySelector('#portrait-landscape-phone') || document.body;
 
                         // Check if this frame content is visible (has dimensions)
                         const bodyRect = document.body.getBoundingClientRect();
                         if (bodyRect.width < 50 || bodyRect.height < 50) {
                             return { ...data, isHidden: true };
+                        }
+
+                        // =====================================================
+                        // EXTRACT APP SUBTITLE/TAGLINE
+                        // =====================================================
+                        const subtitleSelectors = [
+                            '.ns-yp8c1-e-18.headline',
+                            '[class*="yp8c1"][class*="headline"]',
+                            '.headline',
+                            '.c54Vcb-vmv8lc',
+                            '[class*="vmv8lc"]',
+                            '[class*="tagline"]',
+                            '[class*="subtitle"]'
+                        ];
+                        for (const sel of subtitleSelectors) {
+                            try {
+                                const el = root.querySelector(sel);
+                                if (el) {
+                                    const text = (el.innerText || el.textContent || '').trim();
+                                    if (text && text.length >= 3 && text.length <= 150) {
+                                        if (!/^[\d\s\W]+$/.test(text) && !text.includes(':') && !text.includes('{')) {
+                                            data.appSubtitle = text;
+                                            break;
+                                        }
+                                    }
+                                }
+                            } catch (e) { }
+                        }
+
+                        // =====================================================
+                        // EXTRACT IMAGE URL (especially for Image Ads)
+                        // =====================================================
+                        const imageSelectors = [
+                            '.html-container img',
+                            '.creative-container img',
+                            'img[src*="googlesyndication.com"]',
+                            'img[src*="archive/simad"]',
+                            'img[src*="simad"]'
+                        ];
+                        for (const sel of imageSelectors) {
+                            try {
+                                const img = root.querySelector(sel);
+                                if (img && img.src && img.src.startsWith('http')) {
+                                    data.imageUrl = img.src;
+                                    break;
+                                }
+                            } catch (e) { }
                         }
 
                         // =====================================================
@@ -747,6 +755,18 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                         return data;
                     }, blacklistName);
 
+                    // Extract app subtitle if found
+                    if (frameData.appSubtitle && result.appSubtitle === 'NOT_FOUND') {
+                        result.appSubtitle = frameData.appSubtitle;
+                        console.log(`  ✓ Found subtitle: ${result.appSubtitle.substring(0, 50)}...`);
+                    }
+
+                    // Extract Image URL if found
+                    if (frameData.imageUrl && result.imageUrl === 'NOT_FOUND') {
+                        result.imageUrl = frameData.imageUrl;
+                        console.log(`  🖼️ Found Image URL: ${result.imageUrl.substring(0, 50)}...`);
+                    }
+
                     // Skip hidden frames
                     if (frameData.isHidden) continue;
 
@@ -786,13 +806,8 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         const isPlayStore = finalStoreLink && finalStoreLink !== 'NOT_FOUND' && finalStoreLink.includes('play.google.com');
         const isAppleStore = finalStoreLink && finalStoreLink !== 'NOT_FOUND' && finalStoreLink.includes('apps.apple.com');
 
-        // Skip Apple Store ads (shouldn't reach here if we had existing link, but check anyway)
-        if (isAppleStore) {
-            result.videoId = 'SKIP';
-            console.log(`  🍏 Apple App - skipping video`);
-        }
-        // Only extract video ID for Play Store video ads
-        else if (isPlayStore && (needsVideoId || needsMetadata)) {
+        // Extract video ID if needed (for all video ads)
+        if (needsVideoId || needsMetadata) {
             console.log(`  🎬 Extracting Video ID...`);
 
             // Find and click play button (EXACT from agent.js)
@@ -974,7 +989,7 @@ async function extractWithRetry(item, browser) {
         await randomDelay(2000, 4000);
     }
     // If we're here, we exhausted retries. Return whatever we have.
-    return { advertiserName: 'NOT_FOUND', storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', videoId: 'NOT_FOUND' };
+    return { advertiserName: 'NOT_FOUND', storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', videoId: 'NOT_FOUND', appSubtitle: 'NOT_FOUND', imageUrl: 'NOT_FOUND' };
 }
 
 // ============================================
@@ -983,7 +998,7 @@ async function extractWithRetry(item, browser) {
 (async () => {
     console.log(`🤖 Starting UNIFIED Google Ads Agent...\n`);
     console.log(`📋 Sheet: ${SHEET_NAME}`);
-    console.log(`⚡ Columns: A=Advertiser, B=URL, C=App Link, D=App Name, E=Video ID\n`);
+    console.log(`⚡ Columns: A=Advertiser, B=URL, C=App Link, D=App Name, E=Video ID, F=Subtitle, G=Image URL\n`);
 
     const sessionStartTime = Date.now();
     const MAX_RUNTIME = 330 * 60 * 1000;
@@ -1079,7 +1094,9 @@ async function extractWithRetry(item, browser) {
                         advertiserName: data.advertiserName,
                         storeLink: data.storeLink,
                         appName: data.appName,
-                        videoId: data.videoId
+                        videoId: data.videoId,
+                        appSubtitle: data.appSubtitle,
+                        imageUrl: data.imageUrl
                     };
                 }));
 
