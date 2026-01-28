@@ -527,166 +527,179 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
 
         // =====================================================
         // IMAGE AD EXTRACTION - MAIN PAGE + IFRAMES
-        // Extracts: Image URL, App Name, App Subtitle
-        // Writes to: Column D (App Name), Column E (Image URL), Column F (App Subtitle)
+        // Extracts: Image URL, App Name, App HeadLine
+        // Writes to: Column D (App Name), Column E (App HeadLine), Column F (Image URL)
         // =====================================================
         if (needsMetadata) {
             console.log(`  📊 Extracting Image Ad data...`);
 
             let extractedData = null;
+            
+            // Garbage words to filter out
+            const GARBAGE_WORDS = [
+                'INSTALL', 'PRICE', 'NaN', 'Ad ', 'DOWNLOADS', 'KATEGORIE', 
+                'Category', 'ENTWICKLER', 'Developer', 'See more', 'Privacy',
+                'Terms', 'Help', 'Report', 'Why this ad', 'Bewertungen',
+                'Reviews', 'FREE', 'GET', 'OPEN', 'VIEW', 'LEARN MORE',
+                'Sign in', 'Sign up', 'Log in', 'SPONSORED', 'Ads by Google'
+            ];
+            
+            const isGarbage = (text) => {
+                if (!text) return true;
+                const upper = text.toUpperCase();
+                // Check garbage words
+                for (const word of GARBAGE_WORDS) {
+                    if (upper.includes(word.toUpperCase())) return true;
+                }
+                // Check if ALL CAPS (usually labels)
+                if (text.length > 3 && text === text.toUpperCase()) return true;
+                // Check if contains newlines (multiple elements combined)
+                if (text.includes('\n') && text.split('\n').length > 2) return true;
+                // Check for special characters patterns
+                if (/^[\d\s\.\,\-\+\*]+$/.test(text)) return true;
+                return false;
+            };
 
-            // FIRST: Try to extract from main page (Google Ads Transparency page structure)
-            try {
-                extractedData = await page.evaluate(() => {
-                    const data = {
-                        imageUrl: null,
-                        appName: null,
-                        appSubtitle: null
-                    };
+            // Try Puppeteer frame access (most reliable)
+            const frames = page.frames();
+            
+            for (const frame of frames) {
+                if (frame === page.mainFrame()) continue;
+                
+                try {
+                    const frameData = await frame.evaluate(() => {
+                        const data = {
+                            imageUrl: null,
+                            appName: null,
+                            appSubtitle: null
+                        };
 
-                    // Find all iframes on page
-                    const iframes = document.querySelectorAll('iframe');
-                    
-                    for (const iframe of iframes) {
-                        try {
-                            const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
-                            if (!iframeDoc) continue;
-
-                            // Extract IMAGE URL from iframe
-                            const imgs = iframeDoc.querySelectorAll('img');
-                            for (const img of imgs) {
-                                if (img.src && (img.src.includes('googlesyndication') || img.src.includes('simgad'))) {
-                                    data.imageUrl = img.src;
-                                    break;
-                                }
+                        // ========== EXTRACT IMAGE URL ==========
+                        // Only look for googlesyndication/simgad images (actual ad images)
+                        const imgs = document.querySelectorAll('img');
+                        for (const img of imgs) {
+                            if (img.src && (img.src.includes('googlesyndication') || img.src.includes('simgad'))) {
+                                data.imageUrl = img.src;
+                                break;
                             }
-                            if (!data.imageUrl) {
-                                for (const img of imgs) {
-                                    if (img.src && img.src.startsWith('http') && img.width > 50 && img.height > 50) {
-                                        data.imageUrl = img.src;
-                                        break;
+                        }
+                        
+                        // If no googlesyndication image found, this is NOT an image ad
+                        if (!data.imageUrl) {
+                            return null;
+                        }
+
+                        // ========== EXTRACT APP NAME ==========
+                        // Look for specific class patterns or first short span
+                        const titleSelectors = [
+                            '[class*="title"]',
+                            '[class*="app-name"]',
+                            '[id*="title"]',
+                            'span'
+                        ];
+                        
+                        for (const sel of titleSelectors) {
+                            const els = document.querySelectorAll(sel);
+                            for (const el of els) {
+                                // Get direct text only (not children)
+                                let text = '';
+                                for (const node of el.childNodes) {
+                                    if (node.nodeType === Node.TEXT_NODE) {
+                                        text += node.textContent;
                                     }
                                 }
-                            }
-
-                            // Extract APP NAME from iframe (look for title-like text)
-                            const spans = iframeDoc.querySelectorAll('span');
-                            for (const span of spans) {
-                                const text = (span.innerText || span.textContent || '').trim();
-                                if (text && text.length >= 3 && text.length <= 60 && 
-                                    !text.includes('INSTALL') && !text.includes('Ad') && 
-                                    !text.includes('NaN') && !text.includes('PRICE')) {
+                                text = text.trim();
+                                
+                                // Fallback to innerText if no direct text
+                                if (!text) {
+                                    text = (el.innerText || el.textContent || '').trim();
+                                }
+                                
+                                // Valid app name: 3-50 chars, no garbage
+                                if (text && text.length >= 3 && text.length <= 50) {
                                     data.appName = text;
                                     break;
                                 }
                             }
+                            if (data.appName) break;
+                        }
 
-                            // Extract APP SUBTITLE from iframe (look for description text)
-                            const divs = iframeDoc.querySelectorAll('div');
-                            for (const div of divs) {
-                                const text = (div.innerText || div.textContent || '').trim();
-                                if (text && text.length >= 10 && text.length <= 200 && 
-                                    !text.includes('INSTALL') && !text.includes('Ad ') &&
-                                    text !== data.appName) {
+                        // ========== EXTRACT APP HEADLINE (Description) ==========
+                        const descSelectors = [
+                            '[class*="text"]',
+                            '[class*="desc"]',
+                            '[class*="subtitle"]',
+                            'div'
+                        ];
+                        
+                        for (const sel of descSelectors) {
+                            const els = document.querySelectorAll(sel);
+                            for (const el of els) {
+                                // Get direct text only
+                                let text = '';
+                                for (const node of el.childNodes) {
+                                    if (node.nodeType === Node.TEXT_NODE) {
+                                        text += node.textContent;
+                                    }
+                                }
+                                text = text.trim();
+                                
+                                if (!text) {
+                                    text = (el.innerText || el.textContent || '').trim();
+                                }
+                                
+                                // Valid headline: 5-100 chars, different from app name
+                                if (text && text.length >= 5 && text.length <= 100 && 
+                                    text !== data.appName && !text.includes('\n')) {
                                     data.appSubtitle = text;
                                     break;
                                 }
                             }
-
-                            if (data.imageUrl || data.appName) break;
-                        } catch (e) {
-                            // Cross-origin iframe, skip
-                            continue;
+                            if (data.appSubtitle) break;
                         }
-                    }
 
-                    return data;
-                });
+                        return data;
+                    });
 
-                if (extractedData && (extractedData.imageUrl || extractedData.appName)) {
-                    console.log(`  ✓ Extracted from main page iframes`);
-                }
-            } catch (e) {
-                console.log(`  ⚠️ Main page extraction failed: ${e.message}`);
-            }
-
-            // SECOND: If main page didn't work, try Puppeteer frame access
-            if (!extractedData || (!extractedData.imageUrl && !extractedData.appName)) {
-                const frames = page.frames();
-                
-                for (const frame of frames) {
-                    if (frame === page.mainFrame()) continue;  // Skip main frame
-                    
-                    try {
-                        const frameData = await frame.evaluate(() => {
-                            const data = {
-                                imageUrl: null,
-                                appName: null,
-                                appSubtitle: null
-                            };
-
-                            // Get ALL images and find the best one
-                            const imgs = document.querySelectorAll('img');
-                            for (const img of imgs) {
-                                if (img.src && (img.src.includes('googlesyndication') || img.src.includes('simgad'))) {
-                                    data.imageUrl = img.src;
-                                    break;
-                                }
-                            }
-                            if (!data.imageUrl) {
-                                for (const img of imgs) {
-                                    if (img.src && img.src.startsWith('http') && !img.src.includes('gstatic')) {
-                                        data.imageUrl = img.src;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            // Get App Name - look for the first meaningful span
-                            const allText = [];
-                            document.querySelectorAll('span, div, p').forEach(el => {
-                                const text = (el.innerText || el.textContent || '').trim();
-                                if (text && text.length >= 3 && text.length <= 100) {
-                                    allText.push({ text, tag: el.tagName, len: text.length });
-                                }
-                            });
-
-                            // Find app name (shorter text, usually first)
-                            for (const item of allText) {
-                                if (item.len >= 3 && item.len <= 50 && 
-                                    !item.text.includes('INSTALL') && !item.text.includes('NaN') &&
-                                    !item.text.includes('PRICE') && !item.text.includes('Ad ')) {
-                                    data.appName = item.text;
-                                    break;
-                                }
-                            }
-
-                            // Find subtitle (longer text, different from app name)
-                            for (const item of allText) {
-                                if (item.len >= 15 && item.len <= 150 && 
-                                    item.text !== data.appName &&
-                                    !item.text.includes('INSTALL') && !item.text.includes('NaN')) {
-                                    data.appSubtitle = item.text;
-                                    break;
-                                }
-                            }
-
-                            return data;
-                        });
-
-                        if (frameData && (frameData.imageUrl || frameData.appName)) {
-                            extractedData = frameData;
-                            console.log(`  ✓ Extracted from frame`);
-                            break;
+                    // Validate and clean the data
+                    if (frameData && frameData.imageUrl) {
+                        // Clean app name
+                        if (frameData.appName && !isGarbage(frameData.appName)) {
+                            extractedData = extractedData || {};
+                            extractedData.appName = frameData.appName;
                         }
-                    } catch (e) {
-                        continue;
+                        
+                        // Clean subtitle
+                        if (frameData.appSubtitle && !isGarbage(frameData.appSubtitle)) {
+                            extractedData = extractedData || {};
+                            extractedData.appSubtitle = frameData.appSubtitle;
+                        }
+                        
+                        // Always keep image URL
+                        extractedData = extractedData || {};
+                        extractedData.imageUrl = frameData.imageUrl;
+                        
+                        console.log(`  ✓ Found image ad in frame`);
+                        break;
                     }
+                } catch (e) {
+                    continue;
                 }
             }
-
-            // Apply extracted data to result
-            if (extractedData) {
+            
+            // If no image ad found (no googlesyndication image), skip this URL
+            if (!extractedData || !extractedData.imageUrl) {
+                console.log(`  ⏭️  Skipping: Not an image ad (no ad image found)`);
+                result = {
+                    advertiserName: 'SKIP',
+                    appName: 'SKIP',
+                    storeLink: 'SKIP',
+                    videoId: 'SKIP',
+                    appSubtitle: 'SKIP',
+                    imageUrl: 'SKIP'
+                };
+            } else {
+                // Apply extracted data to result
                 if (extractedData.appName) {
                     result.appName = cleanName(extractedData.appName);
                     console.log(`  ✓ App Name (D): ${result.appName}`);
@@ -699,8 +712,6 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     result.imageUrl = extractedData.imageUrl;
                     console.log(`  ✓ Image URL (F): ${result.imageUrl.substring(0, 60)}...`);
                 }
-            } else {
-                console.log(`  ⚠️ No image ad data extracted`);
             }
 
             // Set video ID to SKIP for image ads (not applicable)
@@ -731,25 +742,23 @@ async function extractWithRetry(item, browser) {
 
         if (data.storeLink === 'BLOCKED' || data.appName === 'BLOCKED') return data;
 
-        // If explicitly skipped (not an image ad), return as-is
-        if (data.appName === 'SKIP' && data.imageUrl === 'SKIP') {
+        // If explicitly skipped (not an image ad - no googlesyndication image), return as-is
+        if (data.imageUrl === 'SKIP') {
+            console.log(`  ⏭️  Not an image ad - skipping`);
             return data;
         }
 
         // Success criteria for IMAGE ADS:
-        // We need at least ONE of: appName OR imageUrl (made simpler)
-        const hasAppName = data.appName && data.appName !== 'NOT_FOUND' && data.appName !== 'SKIP';
+        // Must have imageUrl (confirms it's an image ad)
         const hasImageUrl = data.imageUrl && data.imageUrl !== 'NOT_FOUND' && data.imageUrl !== 'SKIP';
         
-        const imageAdSuccess = hasAppName || hasImageUrl;  // At least 1 key field
-
-        if (imageAdSuccess) {
-            return data;
+        if (hasImageUrl) {
+            return data;  // Success - we have the ad image
         } else if (attempt === 1) {
-            console.log(`  ⚠️ Attempt 1 - Incomplete data. Retrying with longer wait...`);
+            console.log(`  ⚠️ Attempt 1 - No image found. Retrying...`);
         }
 
-        await randomDelay(3000, 6000);
+        await randomDelay(4000, 7000);  // Longer wait between retries
     }
     // If we're here, we exhausted retries. Return whatever we have.
     return { advertiserName: 'NOT_FOUND', storeLink: 'NOT_FOUND', appName: 'NOT_FOUND', videoId: 'NOT_FOUND', appSubtitle: 'NOT_FOUND', imageUrl: 'NOT_FOUND' };
