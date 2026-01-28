@@ -60,10 +60,16 @@ jobs:
         run: npm ci || npm install
 
       - name: Create credentials file
+        env:
+          GOOGLE_CREDS: ${{ secrets.GOOGLE_CREDENTIALS }}
         run: |
-          echo '${{ secrets.GOOGLE_CREDENTIALS }}' | base64 -d > credentials.json
-          if [ ! -s credentials.json ]; then
-            echo "❌ Error: credentials.json is empty. Please set GOOGLE_CREDENTIALS_JSON secret."
+          if [ -z "$GOOGLE_CREDS" ]; then
+            echo "❌ Error: GOOGLE_CREDENTIALS secret is not set"
+            exit 1
+          fi
+          echo "$GOOGLE_CREDS" > credentials.json
+          if [ ! -s credentials.json ] || ! grep -q "private_key" credentials.json; then
+            echo "❌ Error: credentials.json is invalid"
             exit 1
           fi
           echo "✓ Credentials file created successfully"
