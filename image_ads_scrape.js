@@ -1,15 +1,15 @@
 /**
  * UNIFIED GOOGLE ADS TRANSPARENCY AGENT - IMAGE ADS
  * ==================================================
- * Extracts data from Image Ads using hover-based extraction
+ * Extracts data from Image Ads on Google Ads Transparency Center
  * 
  * Sheet Structure:
  *   Column A: Advertiser Name
  *   Column B: Ads URL (input)
  *   Column C: App Link (Store Link)
- *   Column D: App Name (from landscape-app-title)
- *   Column E: Image URL (from landscape-image)
- *   Column F: App Subtitle/Tagline (from landscape-app-text)
+ *   Column D: App Name (title of the app)
+ *   Column E: App Head Line (subtitle/description)
+ *   Column F: Image URL (from ad image)
  *   Column M: Timestamp
  */
 
@@ -179,7 +179,7 @@ async function batchWriteToSheet(sheets, updates) {
             data.push({ range: `${SHEET_NAME}!A${rowNum}`, values: [[advertiserName]] });
         }
         
-        // Column C: Store Link (optional)
+        // Column C: Store Link / App Link (optional)
         if (storeLink && storeLink !== 'SKIP' && storeLink !== 'NOT_FOUND') {
             data.push({ range: `${SHEET_NAME}!C${rowNum}`, values: [[storeLink]] });
         }
@@ -189,19 +189,19 @@ async function batchWriteToSheet(sheets, updates) {
             data.push({ range: `${SHEET_NAME}!D${rowNum}`, values: [[appName || 'NOT_FOUND']] });
         }
         
-        // Column E: Image URL (for image ads) - Previously Video ID
-        // For image ads, we write the image URL here instead of video ID
-        if (imageUrl && imageUrl !== 'SKIP' && imageUrl !== 'NOT_FOUND') {
-            data.push({ range: `${SHEET_NAME}!E${rowNum}`, values: [[imageUrl]] });
-        } else if (videoId && videoId !== 'SKIP' && videoId !== 'NOT_FOUND') {
-            // Fallback: write video ID if it exists (for video ads)
-            data.push({ range: `${SHEET_NAME}!E${rowNum}`, values: [[videoId]] });
+        // Column E: App Head Line / Subtitle (description text)
+        if (appSubtitle && appSubtitle !== 'SKIP' && appSubtitle !== 'NOT_FOUND') {
+            data.push({ range: `${SHEET_NAME}!E${rowNum}`, values: [[appSubtitle]] });
         } else {
             data.push({ range: `${SHEET_NAME}!E${rowNum}`, values: [['NOT_FOUND']] });
         }
         
-        // Column F: App Subtitle/Tagline
-        data.push({ range: `${SHEET_NAME}!F${rowNum}`, values: [[appSubtitle || 'NOT_FOUND']] });
+        // Column F: Image URL
+        if (imageUrl && imageUrl !== 'SKIP' && imageUrl !== 'NOT_FOUND') {
+            data.push({ range: `${SHEET_NAME}!F${rowNum}`, values: [[imageUrl]] });
+        } else {
+            data.push({ range: `${SHEET_NAME}!F${rowNum}`, values: [['NOT_FOUND']] });
+        }
 
         // Write Timestamp to Column M (Pakistan Time)
         const timestamp = new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi' });
@@ -526,170 +526,162 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
         }
 
         // =====================================================
-        // IMAGE AD EXTRACTION - HOVER BASED
+        // IMAGE AD EXTRACTION - MAIN PAGE + IFRAMES
         // Extracts: Image URL, App Name, App Subtitle
         // Writes to: Column D (App Name), Column E (Image URL), Column F (App Subtitle)
         // =====================================================
         if (needsMetadata) {
-            console.log(`  📊 Extracting Image Ad data using hover...`);
+            console.log(`  📊 Extracting Image Ad data...`);
 
-            // Find all iframes that might contain the ad
-            const frames = page.frames();
             let extractedData = null;
-            let validImageAdFound = false;
 
-            for (const frame of frames) {
-                try {
-                    // Check if frame has ad content (more flexible check)
-                    const hasAdContent = await frame.evaluate(() => {
-                        // Check for image in various ways
-                        const img = document.querySelector('img[class*="landscape"], img[id*="landscape"], [class*="landscape"] img, [id*="landscape"] img');
-                        // Check for text elements (title or description)
-                        const textElements = document.querySelectorAll('span, div, h1, h2, h3');
-                        
-                        if (!img || textElements.length === 0) return false;
-                        return true;
-                    });
+            // FIRST: Try to extract from main page (Google Ads Transparency page structure)
+            try {
+                extractedData = await page.evaluate(() => {
+                    const data = {
+                        imageUrl: null,
+                        appName: null,
+                        appSubtitle: null
+                    };
 
-                    if (!hasAdContent) {
-                        continue;  // Skip this frame - no ad content
+                    // Find all iframes on page
+                    const iframes = document.querySelectorAll('iframe');
+                    
+                    for (const iframe of iframes) {
+                        try {
+                            const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+                            if (!iframeDoc) continue;
+
+                            // Extract IMAGE URL from iframe
+                            const imgs = iframeDoc.querySelectorAll('img');
+                            for (const img of imgs) {
+                                if (img.src && (img.src.includes('googlesyndication') || img.src.includes('simgad'))) {
+                                    data.imageUrl = img.src;
+                                    break;
+                                }
+                            }
+                            if (!data.imageUrl) {
+                                for (const img of imgs) {
+                                    if (img.src && img.src.startsWith('http') && img.width > 50 && img.height > 50) {
+                                        data.imageUrl = img.src;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            // Extract APP NAME from iframe (look for title-like text)
+                            const spans = iframeDoc.querySelectorAll('span');
+                            for (const span of spans) {
+                                const text = (span.innerText || span.textContent || '').trim();
+                                if (text && text.length >= 3 && text.length <= 60 && 
+                                    !text.includes('INSTALL') && !text.includes('Ad') && 
+                                    !text.includes('NaN') && !text.includes('PRICE')) {
+                                    data.appName = text;
+                                    break;
+                                }
+                            }
+
+                            // Extract APP SUBTITLE from iframe (look for description text)
+                            const divs = iframeDoc.querySelectorAll('div');
+                            for (const div of divs) {
+                                const text = (div.innerText || div.textContent || '').trim();
+                                if (text && text.length >= 10 && text.length <= 200 && 
+                                    !text.includes('INSTALL') && !text.includes('Ad ') &&
+                                    text !== data.appName) {
+                                    data.appSubtitle = text;
+                                    break;
+                                }
+                            }
+
+                            if (data.imageUrl || data.appName) break;
+                        } catch (e) {
+                            // Cross-origin iframe, skip
+                            continue;
+                        }
                     }
 
-                    validImageAdFound = true;
-                    console.log(`  ✅ Found ad content, attempting extraction...`);
+                    return data;
+                });
 
-                    // Get the image element handle for hover
-                    const imgElement = await frame.$('img.landscape-image, img#landscape-image, .landscape-image img');
+                if (extractedData && (extractedData.imageUrl || extractedData.appName)) {
+                    console.log(`  ✓ Extracted from main page iframes`);
+                }
+            } catch (e) {
+                console.log(`  ⚠️ Main page extraction failed: ${e.message}`);
+            }
+
+            // SECOND: If main page didn't work, try Puppeteer frame access
+            if (!extractedData || (!extractedData.imageUrl && !extractedData.appName)) {
+                const frames = page.frames();
+                
+                for (const frame of frames) {
+                    if (frame === page.mainFrame()) continue;  // Skip main frame
                     
-                    if (imgElement) {
-                        // Scroll element into view first
-                        try {
-                            await frame.evaluate(el => {
-                                if (el) el.scrollIntoView({ block: 'center', behavior: 'instant' });
-                            }, imgElement);
-                            await sleep(200);
-
-                            // Hover over the image with timeout
-                            await Promise.race([
-                                imgElement.hover(),
-                                new Promise((_, reject) => setTimeout(() => reject(new Error('Hover timeout')), 2000))
-                            ]);
-                            await sleep(300); // Reduced from 500ms
-
-                            // Now extract all data from this frame with timeout
-                            const extractPromise = frame.evaluate(() => {
+                    try {
+                        const frameData = await frame.evaluate(() => {
                             const data = {
                                 imageUrl: null,
                                 appName: null,
                                 appSubtitle: null
                             };
 
-                            // =====================================================
-                            // EXTRACT IMAGE URL (from any image on page)
-                            // =====================================================
-                            const imageSelectors = [
-                                'img[class*="landscape"]',
-                                'img[id*="landscape"]',
-                                '[class*="landscape"] img',
-                                'img[src*="googlesyndication"]',
-                                'img[src*="simgad"]',
-                                'img'  // Fallback to any image
-                            ];
-                            
-                            for (const sel of imageSelectors) {
-                                const imgs = document.querySelectorAll(sel);
+                            // Get ALL images and find the best one
+                            const imgs = document.querySelectorAll('img');
+                            for (const img of imgs) {
+                                if (img.src && (img.src.includes('googlesyndication') || img.src.includes('simgad'))) {
+                                    data.imageUrl = img.src;
+                                    break;
+                                }
+                            }
+                            if (!data.imageUrl) {
                                 for (const img of imgs) {
-                                    if (img.src && img.src.startsWith('http') && img.src.length > 20) {
-                                        // Prefer googlesyndication but accept any image
-                                        if (img.src.includes('googlesyndication') || img.src.includes('simgad')) {
-                                            data.imageUrl = img.src;
-                                            break;
-                                        }
-                                        if (!data.imageUrl && !img.src.includes('gstatic.com')) {
-                                            data.imageUrl = img.src;
-                                        }
-                                    }
-                                }
-                                if (data.imageUrl) break;
-                            }
-
-                            // =====================================================
-                            // EXTRACT APP NAME (App Title) - Try multiple strategies
-                            // =====================================================
-                            const appNameSelectors = [
-                                'span[class*="title"], span[id*="title"]',
-                                'h1, h2, h3',
-                                'span[class*="app"], span[id*="app"]',
-                                '.landscape-app-title',
-                                '[class*="landscape"] span:first-child',
-                                'span'  // Fallback
-                            ];
-
-                            for (const sel of appNameSelectors) {
-                                const elements = document.querySelectorAll(sel);
-                                for (const el of elements) {
-                                    const text = (el.innerText || el.textContent || '').trim();
-                                    if (text && text.length >= 2 && text.length <= 80 && !text.includes('INSTALL') && !text.includes('PRICE')) {
-                                        data.appName = text;
+                                    if (img.src && img.src.startsWith('http') && !img.src.includes('gstatic')) {
+                                        data.imageUrl = img.src;
                                         break;
                                     }
                                 }
-                                if (data.appName) break;
                             }
 
-                            // =====================================================
-                            // EXTRACT APP SUBTITLE (App Text/Description)
-                            // =====================================================
-                            const appSubtitleSelectors = [
-                                'div[class*="text"], div[class*="description"], div[class*="subtitle"]',
-                                'div[id*="text"], div[id*="description"]',
-                                '.landscape-app-text',
-                                'p, div:not([class=""])',  // Any paragraph or styled div
-                                'div'  // Fallback
-                            ];
-
-                            for (const sel of appSubtitleSelectors) {
-                                const elements = document.querySelectorAll(sel);
-                                for (const el of elements) {
-                                    const text = (el.innerText || el.textContent || '').trim();
-                                    if (text && text.length >= 5 && text.length <= 200 && 
-                                        !text.includes('INSTALL') && !text.includes('PRICE') &&
-                                        !text.includes('See more ads') && !text.toUpperCase() === text) {  // Avoid all caps labels
-                                        data.appSubtitle = text;
-                                        break;
-                                    }
+                            // Get App Name - look for the first meaningful span
+                            const allText = [];
+                            document.querySelectorAll('span, div, p').forEach(el => {
+                                const text = (el.innerText || el.textContent || '').trim();
+                                if (text && text.length >= 3 && text.length <= 100) {
+                                    allText.push({ text, tag: el.tagName, len: text.length });
                                 }
-                                if (data.appSubtitle) break;
+                            });
+
+                            // Find app name (shorter text, usually first)
+                            for (const item of allText) {
+                                if (item.len >= 3 && item.len <= 50 && 
+                                    !item.text.includes('INSTALL') && !item.text.includes('NaN') &&
+                                    !item.text.includes('PRICE') && !item.text.includes('Ad ')) {
+                                    data.appName = item.text;
+                                    break;
+                                }
+                            }
+
+                            // Find subtitle (longer text, different from app name)
+                            for (const item of allText) {
+                                if (item.len >= 15 && item.len <= 150 && 
+                                    item.text !== data.appName &&
+                                    !item.text.includes('INSTALL') && !item.text.includes('NaN')) {
+                                    data.appSubtitle = item.text;
+                                    break;
+                                }
                             }
 
                             return data;
                         });
 
-                            // Wrap extraction with timeout (max 5 seconds - increased)
-                            extractedData = await Promise.race([
-                                extractPromise,
-                                new Promise((resolve) => {
-                                    setTimeout(() => resolve({
-                                        imageUrl: null,
-                                        appName: null,
-                                        appSubtitle: null
-                                    }), 5000);
-                                })
-                            ]);
-
-                            // If we found at least the image URL, we have the right frame
-                            if (extractedData && (extractedData.imageUrl || extractedData.appName)) {
-                                console.log(`  ✓ Hover extraction successful!`);
-                                break;
-                            }
-                        } catch (hoverErr) {
-                            // Hover extraction failed, continue to next frame
-                            continue;
+                        if (frameData && (frameData.imageUrl || frameData.appName)) {
+                            extractedData = frameData;
+                            console.log(`  ✓ Extracted from frame`);
+                            break;
                         }
+                    } catch (e) {
+                        continue;
                     }
-                } catch (e) {
-                    // Frame access error, continue to next frame
-                    continue;
                 }
             }
 
@@ -699,24 +691,14 @@ async function extractAllInOneVisit(url, browser, needsMetadata, needsVideoId, e
                     result.appName = cleanName(extractedData.appName);
                     console.log(`  ✓ App Name (D): ${result.appName}`);
                 }
-                if (extractedData.imageUrl) {
-                    result.imageUrl = extractedData.imageUrl;
-                    console.log(`  ✓ Image URL (E): ${result.imageUrl.substring(0, 60)}...`);
-                }
                 if (extractedData.appSubtitle) {
                     result.appSubtitle = extractedData.appSubtitle;
-                    console.log(`  ✓ App Subtitle (F): ${result.appSubtitle}`);
+                    console.log(`  ✓ App HeadLine (E): ${result.appSubtitle}`);
                 }
-            } else if (!validImageAdFound) {
-                console.log(`  ⏭️  Skipping: Not an image ad (no matching structure)`);
-                result = {
-                    advertiserName: 'SKIP',
-                    appName: 'SKIP',
-                    storeLink: 'SKIP',
-                    videoId: 'SKIP',
-                    appSubtitle: 'SKIP',
-                    imageUrl: 'SKIP'
-                };
+                if (extractedData.imageUrl) {
+                    result.imageUrl = extractedData.imageUrl;
+                    console.log(`  ✓ Image URL (F): ${result.imageUrl.substring(0, 60)}...`);
+                }
             } else {
                 console.log(`  ⚠️ No image ad data extracted`);
             }
@@ -755,13 +737,11 @@ async function extractWithRetry(item, browser) {
         }
 
         // Success criteria for IMAGE ADS:
-        // We need at least TWO of: appName, imageUrl, or appSubtitle (made less strict)
+        // We need at least ONE of: appName OR imageUrl (made simpler)
         const hasAppName = data.appName && data.appName !== 'NOT_FOUND' && data.appName !== 'SKIP';
         const hasImageUrl = data.imageUrl && data.imageUrl !== 'NOT_FOUND' && data.imageUrl !== 'SKIP';
-        const hasSubtitle = data.appSubtitle && data.appSubtitle !== 'NOT_FOUND' && data.appSubtitle !== 'SKIP';
         
-        const successCount = [hasAppName, hasImageUrl, hasSubtitle].filter(Boolean).length;
-        const imageAdSuccess = successCount >= 2;  // At least 2 of 3 fields
+        const imageAdSuccess = hasAppName || hasImageUrl;  // At least 1 key field
 
         if (imageAdSuccess) {
             return data;
@@ -781,7 +761,7 @@ async function extractWithRetry(item, browser) {
 (async () => {
     console.log(`🤖 Starting IMAGE ADS Google Ads Agent...\n`);
     console.log(`📋 Sheet: ${SHEET_NAME}`);
-    console.log(`⚡ Columns: D=App Name, E=Image URL, F=App Subtitle\n`);
+    console.log(`⚡ Columns: D=App Name, E=App HeadLine, F=Image URL\n`);
 
     const sessionStartTime = Date.now();
     const MAX_RUNTIME = 330 * 60 * 1000;
